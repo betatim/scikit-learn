@@ -41,6 +41,7 @@ from ..utils._param_validation import StrOptions
 from ..utils._param_validation import validate_params
 from ..utils._openmp_helpers import _openmp_effective_n_threads
 from ..utils._readonly_array_wrapper import ReadonlyArrayWrapper
+from .. import hookspecs
 from ..exceptions import ConvergenceWarning
 from ._k_means_common import CHUNK_SIZE
 from ._k_means_common import _inertia_dense
@@ -431,6 +432,31 @@ def k_means(
         return est.cluster_centers_, est.labels_, est.inertia_
 
 
+# Register an implementation of the "kmeans elkan hook"
+# XXX 1. I'm not sure if this should contain the code from `_kmeans_single_elkan`
+# XXX or if having this level of indirection is better?
+# XXX 2. Should the hook implementation be in a different file?
+#
+# Default implementation of the elkan algorithm
+# This will be called last of all implementations of this hook
+# Using `specname` allows us to name this function what ever we want
+# e.g. we could name it `_numpy_kmeans_single_elkan` to keep it private
+@hookspecs.hookimpl(specname="kmeans_single_elkan", trylast=True)
+def kmeans_single_elkan(
+    X, sample_weight, centers_init, max_iter, verbose, tol, n_threads
+):
+    print("base elkan called")
+    return _kmeans_single_elkan(
+        X,
+        sample_weight,
+        centers_init,
+        max_iter,
+        verbose,
+        tol,
+        n_threads,
+    )
+
+
 def _kmeans_single_elkan(
     X,
     sample_weight,
@@ -594,6 +620,27 @@ def _kmeans_single_elkan(
     inertia = _inertia(X, sample_weight, centers, labels, n_threads)
 
     return labels, inertia, centers, i + 1
+
+
+# Register an implementation of the "kmeans lloyd hook"
+# XXX Same comment as above regarding "include code or indirect?"
+#
+# Default implementation of the lloyd algorithm
+# This will be called last of all registered implementations
+@hookspecs.hookimpl(specname="kmeans_single_lloyd", trylast=True)
+def numpy_kmeans_single_lloyd(
+    X, sample_weight, centers_init, max_iter, verbose, tol, n_threads
+):
+    print("base lloyd called")
+    return _kmeans_single_lloyd(
+        X,
+        sample_weight,
+        centers_init,
+        max_iter,
+        verbose,
+        tol,
+        n_threads,
+    )
 
 
 def _kmeans_single_lloyd(

@@ -7,8 +7,6 @@ import numpy as np
 import scipy.sparse as sp
 
 from ._kmeans import _BaseKMeans
-from ._kmeans import _kmeans_single_elkan
-from ._kmeans import _kmeans_single_lloyd
 from ._kmeans import _labels_inertia_threadpool_limit
 from ._k_means_common import _inertia_dense
 from ._k_means_common import _inertia_sparse
@@ -18,6 +16,7 @@ from ..utils.validation import check_is_fitted
 from ..utils.validation import _check_sample_weight
 from ..utils.validation import check_random_state
 from ..utils._param_validation import StrOptions
+from .. import plugins
 
 
 class _BisectingTree:
@@ -313,9 +312,9 @@ class BisectingKMeans(_BaseKMeans):
             )
 
             labels, inertia, centers, _ = self._kmeans_single(
-                X,
-                sample_weight,
-                centers_init,
+                X=X,
+                sample_weight=sample_weight,
+                centers_init=centers_init,
                 max_iter=self.max_iter,
                 verbose=self.verbose,
                 tol=self.tol,
@@ -384,10 +383,12 @@ class BisectingKMeans(_BaseKMeans):
         self._n_threads = _openmp_effective_n_threads()
 
         if self.algorithm == "lloyd" or self.n_clusters == 1:
-            self._kmeans_single = _kmeans_single_lloyd
+            # Use the "kmeans llod hook" whick takes care of calling all the
+            # registered implementations
+            self._kmeans_single = plugins.manager.hook.kmeans_single_lloyd
             self._check_mkl_vcomp(X, X.shape[0])
         else:
-            self._kmeans_single = _kmeans_single_elkan
+            self._kmeans_single = plugins.manager.hook.kmeans_single_elkan
 
         # Subtract of mean of X for more accurate distance computations
         if not sp.issparse(X):
