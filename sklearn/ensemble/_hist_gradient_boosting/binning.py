@@ -46,20 +46,20 @@ def _find_binning_thresholds(col_data, max_bins):
     if missing_mask.any():
         col_data = col_data[~missing_mask]
     col_data = np.ascontiguousarray(col_data, dtype=X_DTYPE)
-    distinct_values = np.unique(col_data)
+
+    percentiles = np.linspace(0, 100, num=max_bins + 1)
+    percentiles = percentiles[1:-1]
+    midpoints = percentile(col_data, percentiles, method="midpoint").astype(X_DTYPE)
+    assert midpoints.shape[0] == max_bins - 1
+
+    # For low cardinality data we'd like "nice" bin boundaries instead of using
+    # those estimated by the percentiles.
+    # Calling unique() on the percentiles is virtually for free. This is why
+    # we first estimate the percentiles, instead of calling unique() first
+    distinct_values = np.unique(percentiles)
     if len(distinct_values) <= max_bins:
         midpoints = distinct_values[:-1] + distinct_values[1:]
         midpoints *= 0.5
-    else:
-        # We sort again the data in this case. We could compute
-        # approximate midpoint percentiles using the output of
-        # np.unique(col_data, return_counts) instead but this is more
-        # work and the performance benefit will be limited because we
-        # work on a fixed-size subsample of the full data.
-        percentiles = np.linspace(0, 100, num=max_bins + 1)
-        percentiles = percentiles[1:-1]
-        midpoints = percentile(col_data, percentiles, method="midpoint").astype(X_DTYPE)
-        assert midpoints.shape[0] == max_bins - 1
 
     # We avoid having +inf thresholds: +inf thresholds are only allowed in
     # a "split on nan" situation.
