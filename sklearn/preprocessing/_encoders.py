@@ -1385,3 +1385,76 @@ class OrdinalEncoder(OneToOneFeatureMixin, _BaseEncoder):
                 X_tr[mask, idx] = None
 
         return X_tr
+
+
+import scipy.sparse as sp
+
+
+def contingency_matrix(x, y, sparse=False, dtype=np.int64):
+    categories, categories_idx = np.unique(x, return_inverse=True)
+    classes, classes_idx = np.unique(y, return_inverse=True)
+    n_categories = categories.shape[0]
+    n_classes = classes.shape[0]
+
+    contingency = sp.coo_matrix(
+        (np.ones(categories_idx.shape[0]), (categories_idx, classes_idx)),
+        shape=(n_categories, n_classes),
+        dtype=dtype,
+    )
+    if sparse:
+        contingency = contingency.tocsr()
+        contingency.sum_duplicates()
+    else:
+        contingency = contingency.toarray()
+
+    return categories, classes, contingency
+
+
+class NominalEncoder(_BaseEncoder):
+    def __init__(self):
+        pass
+
+    def fit(self, X, y):
+        X_columns, n_samples, n_features = self._check_X(X)
+        self.categories_ = []
+        # n_samples, n_features = X.shape
+        for column in X_columns:
+            categories, classes, C = contingency_matrix(column, y)
+
+            P = C / C.sum(axis=1).reshape(-1, 1)
+            pbar = C.sum(axis=0) / C.sum()
+
+            n_classes = classes.shape[0]
+            sigma = np.zeros((n_classes, n_classes))
+
+            for a in range(categories.shape[0]):
+                sigma += C.sum(axis=1)[a] * np.outer(
+                    (P[a, :] - pbar), (P[a, :] - pbar).T
+                )
+
+            w, v = np.linalg.eig(sigma)
+            v0 = v[:, np.argmax(w)]
+
+            category_mapping = {}
+            for a, category in enumerate(categories):
+                replacement = v0 @ P[a, :]
+                category_mapping[category] = replacement
+
+            self.categories_.append(category_mapping)
+
+        return self
+
+    def transform(self, X):
+        n_samples, n_features = X.shape
+        transformed_X = np.zeros_like(X, dtype=np.float)
+        for feat_idx in range(n_features):
+            categories = self.categories_[feat_idx]
+
+            for i, x in enumerate(X[:, feat_idx]):
+                if x in categories:
+                    replacement = categories[x]
+                else:
+                    replacement = -1
+                transformed_X[i, feat_idx] = replacement
+
+        return transformed_X

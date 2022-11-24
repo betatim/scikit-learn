@@ -8,10 +8,9 @@ from sklearn.exceptions import NotFittedError
 from sklearn.utils._testing import assert_array_equal
 from sklearn.utils._testing import assert_allclose
 from sklearn.utils._testing import _convert_container
-from sklearn.utils import is_scalar_nan
+from sklearn.utils import is_scalar_nan, shuffle
 
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.preprocessing import OrdinalEncoder
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, NominalEncoder
 
 
 def test_one_hot_encoder_sparse_dense():
@@ -1939,3 +1938,50 @@ def test_ordinal_set_output():
 
     assert_allclose(X_pandas.to_numpy(), X_default)
     assert_array_equal(ord_pandas.get_feature_names_out(), X_pandas.columns)
+
+
+def make_fruit_dataset():
+    """Fruit ripeness dataset"""
+    categories = {
+        # counts per label (ps, np, pr)
+        "green": (20, 3, 1),
+        "blue": (19, 4, 2),
+        "purple": (25, 4, 7),
+        "dark orange": (64, 4, 20),
+        "light orange": (16, 1, 5),
+        "yellow": (100, 2, 3),
+        "red": (200, 3, 4),
+    }
+
+    X = []
+    y = []
+    for colour, counts in categories.items():
+        X += [colour] * sum(counts)
+        y += ["ps"] * counts[0]
+        y += ["np"] * counts[1]
+        y += ["pr"] * counts[2]
+
+    X = np.array(X).reshape(-1, 1)
+
+    return shuffle(X, np.array(y), random_state=42)
+
+
+def make_odd_even_dataset():
+    X = list(range(100))
+    y = [x % 2 for x in X]
+
+    return shuffle(np.array(X).reshape(-1, 1), np.array(y), random_state=42)
+
+
+def test_nominal_encoder():
+    enc = NominalEncoder()
+
+    X, y = make_fruit_dataset()
+    X, y = make_odd_even_dataset()
+
+    enc.fit(X, y)
+
+    X_transformed = enc.transform(X[:5, :])
+
+    print(X_transformed)
+    print(y[:5])
