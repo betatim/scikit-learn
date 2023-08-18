@@ -41,6 +41,9 @@ from sklearn.model_selection import (
 )
 from sklearn.preprocessing import minmax_scale
 from sklearn.utils import _IS_32BIT, check_random_state
+from sklearn.utils._array_api import (
+    yield_namespace_device_dtype_combinations,
+)
 from sklearn.utils._testing import (
     assert_allclose,
     assert_almost_equal,
@@ -81,6 +84,13 @@ def _accuracy_callable(y_test, y_pred):
 
 def _mean_squared_error_callable(y_test, y_pred):
     return ((y_test - y_pred) ** 2).mean()
+
+
+@pytest.mark.parametrize(
+    "array_namepsace, device, dtype", yield_namespace_device_dtype_combinations()
+)
+def test_array_api_ridge(array_namepsace, device, dtype):
+    pass
 
 
 @pytest.fixture(params=["long", "wide"])

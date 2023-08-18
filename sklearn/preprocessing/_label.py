@@ -524,7 +524,7 @@ def label_binarize(y, *, classes, neg_label=0, pos_label=1, sparse_output=False)
     if y_type == "unknown":
         raise ValueError("The type of target data is not known")
 
-    n_samples = y.shape[0] if sp.issparse(y) else len(y)
+    n_samples = y.shape[0]  # if sp.issparse(y) else len(y)
     n_classes = len(classes)
     classes = np.asarray(classes)
 

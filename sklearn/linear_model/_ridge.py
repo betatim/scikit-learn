@@ -1241,7 +1241,10 @@ class _RidgeClassifierMixin(LinearClassifierMixin):
         return self._label_binarizer.classes_
 
     def _more_tags(self):
-        return {"multilabel": True}
+        return {
+            "multilabel": True,
+            "array_api_support": True,
+        }
 
 
 class RidgeClassifier(_RidgeClassifierMixin, _BaseRidge):
