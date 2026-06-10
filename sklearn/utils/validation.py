@@ -25,6 +25,7 @@ from sklearn.utils._array_api import (
     _asarray_with_order,
     _is_numpy_namespace,
     _max_precision_float_dtype,
+    _to_namespace_dtype,
     get_namespace,
     get_namespace_and_device,
     move_to,
@@ -980,9 +981,14 @@ def check_array(
             f"{ensure_all_finite!r} instead."
         )
 
-    if dtype is not None and _is_numpy_namespace(xp):
-        # convert to dtype object to conform to Array API to be use `xp.isdtype` later
-        dtype = np.dtype(dtype)
+    if dtype is not None:
+        # Normalize `dtype` to one that is native to the target namespace so
+        # that `xp.isdtype`, `xp.astype` and `xp.asarray` accept it. For NumPy
+        # namespaces this yields a `numpy.dtype` object (as before); for other
+        # namespaces (e.g. torch) this maps a NumPy dtype passed by code that is
+        # not Array API aware (e.g. `dtype=np.float64`) to the equivalent native
+        # dtype, avoiding `TypeError` when it is later forwarded to `xp.asarray`.
+        dtype = _to_namespace_dtype(dtype, xp)
 
     estimator_name = _check_estimator_name(estimator)
     context = " by %s" % estimator_name if estimator is not None else ""

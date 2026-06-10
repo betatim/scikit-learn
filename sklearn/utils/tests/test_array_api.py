@@ -33,6 +33,7 @@ from sklearn.utils._array_api import (
     _nanmean,
     _nanmin,
     _ravel,
+    _to_namespace_dtype,
     _validate_diagonal_args,
     check_same_namespace,
     get_namespace,
@@ -56,6 +57,7 @@ from sklearn.utils._testing import (
     skip_if_array_api_compat_not_configured,
 )
 from sklearn.utils.fixes import _IS_32BIT, CSR_CONTAINERS, np_version, parse_version
+from sklearn.utils.validation import check_array
 
 
 @pytest.mark.parametrize("X", [numpy.asarray([1, 2, 3]), [1, 2, 3], (1, 2, 3)])
@@ -202,6 +204,95 @@ def test_asarray_with_order(array_api):
 
     X_new_np = numpy.asarray(X_new)
     assert X_new_np.flags["F_CONTIGUOUS"]
+
+
+# dtypes expressed in a way that is not native to a non-NumPy namespace, as
+# passed by code that is not Array API aware (e.g. ``check_array(X,
+# dtype=np.float64)``). Each entry is ``(input_dtype, expected_dtype_name)``.
+_NON_NATIVE_DTYPES = [
+    (numpy.float64, "float64"),
+    (numpy.float32, "float32"),
+    (numpy.dtype("int64"), "int64"),
+    ("float32", "float32"),
+    (float, "float64"),
+]
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, _",
+    yield_namespace_device_dtype_combinations(),
+)
+@pytest.mark.parametrize("input_dtype, expected_name", _NON_NATIVE_DTYPES)
+def test_to_namespace_dtype(
+    array_namespace, device_name, _, input_dtype, expected_name
+):
+    """Non-native dtypes map to the matching native dtype of the namespace.
+
+    This pins the behavior that ``check_array``/``_asarray_with_order`` rely on
+    to accept NumPy dtypes (e.g. ``np.float64``) for non-NumPy namespaces.
+    """
+    xp, _device = _array_api_for_tests(array_namespace, device_name)
+
+    with config_context(array_api_dispatch=True):
+        mapped = _to_namespace_dtype(input_dtype, xp)
+        if _is_numpy_namespace(xp):
+            assert mapped == numpy.dtype(expected_name)
+        else:
+            assert mapped is getattr(xp, expected_name)
+
+        # A dtype already native to the namespace is returned unchanged, and
+        # None passes through.
+        native = getattr(xp, expected_name)
+        assert _to_namespace_dtype(native, xp) == native
+        assert _to_namespace_dtype(None, xp) is None
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+@pytest.mark.parametrize("input_dtype, expected_name", _NON_NATIVE_DTYPES)
+def test_asarray_with_order_non_native_dtype(
+    array_namespace, device_name, dtype_name, input_dtype, expected_name
+):
+    """`_asarray_with_order` accepts NumPy-style dtypes for any namespace.
+
+    Regression test for the class of error where code that is not Array API
+    aware passes e.g. ``dtype=np.float64`` and it is forwarded verbatim to
+    ``xp.asarray``, which non-NumPy namespaces (e.g. torch) reject.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+
+    X_np = numpy.arange(6.0).reshape(3, 2)
+    with config_context(array_api_dispatch=True):
+        X = xp.asarray(X_np, device=device)
+        out = _asarray_with_order(X, dtype=input_dtype, xp=xp)
+        assert out.dtype == getattr(xp, expected_name)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+@pytest.mark.parametrize("input_dtype, expected_name", _NON_NATIVE_DTYPES)
+def test_check_array_non_native_dtype_array_api_dispatch(
+    array_namespace, device_name, dtype_name, input_dtype, expected_name
+):
+    """`check_array` accepts a NumPy dtype under dispatch for any namespace.
+
+    Higher-level invariant: estimators that are not Array API aware pass
+    e.g. ``dtype=np.float64`` to ``validate_data``/``check_array``. Enabling
+    ``array_api_dispatch`` must not turn this into a ``TypeError``; the returned
+    array must live in the input namespace with the matching native dtype.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+
+    X_np = numpy.arange(6.0).reshape(3, 2)
+    with config_context(array_api_dispatch=True):
+        X = xp.asarray(X_np, device=device)
+        X_checked = check_array(X, dtype=input_dtype)
+        assert get_namespace(X_checked)[0] == xp
+        assert X_checked.dtype == getattr(xp, expected_name)
 
 
 @pytest.mark.parametrize(

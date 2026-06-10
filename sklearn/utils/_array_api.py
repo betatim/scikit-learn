@@ -990,6 +990,43 @@ def _nansum(X, axis=None, xp=None, keepdims=False, dtype=None):
     return xp.sum(masked_arr, axis=axis, keepdims=keepdims, dtype=dtype)
 
 
+def _to_namespace_dtype(dtype, xp):
+    """Return the dtype native to namespace ``xp`` that matches ``dtype``.
+
+    ``dtype`` may be expressed in a way that is not native to ``xp``, for
+    instance a NumPy dtype object, a Python/NumPy scalar type (``float``,
+    ``numpy.float64``) or a dtype name (``"float64"``). This typically happens
+    when code that is not Array API aware passes ``dtype=numpy.float64`` to
+    ``check_array`` while ``array_api_dispatch`` is enabled. Such values cannot
+    be forwarded directly to ``xp.asarray`` (or ``xp.isdtype``/``xp.astype``)
+    for non-NumPy namespaces such as PyTorch.
+
+    If ``dtype`` is ``None``, ``xp`` is a NumPy namespace, or ``dtype`` is
+    already a dtype native to ``xp`` (e.g. ``torch.float64``), it is returned
+    essentially unchanged (NumPy namespaces normalize it to a ``numpy.dtype``
+    object, matching the historical behavior of ``check_array``).
+    """
+    if dtype is None:
+        return None
+
+    if _is_numpy_namespace(xp):
+        # Normalize to a dtype object so that `xp.isdtype` can be used later.
+        return numpy.dtype(dtype)
+
+    try:
+        np_dtype = numpy.dtype(dtype)
+    except TypeError:
+        # `dtype` is not expressible as a NumPy dtype, which means it is
+        # probably already a dtype object native to `xp`
+        # (e.g. `torch.float64`)?
+        return dtype
+
+    # Map the NumPy dtype to the equivalent dtype of the target namespace,
+    # e.g. numpy.float64 -> torch.float64. The Array API standard requires
+    # namespaces to expose their dtypes as module attributes by name.
+    return getattr(xp, np_dtype.name)
+
+
 def _asarray_with_order(
     array, dtype=None, order=None, copy=None, *, xp=None, device=None
 ):
@@ -1017,6 +1054,7 @@ def _asarray_with_order(
         # container that is consistent with the input's namespace.
         return xp.asarray(array)
     else:
+        dtype = _to_namespace_dtype(dtype, xp)
         return xp.asarray(array, dtype=dtype, copy=copy, device=device)
 
 
