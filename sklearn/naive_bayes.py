@@ -19,7 +19,10 @@ from sklearn.preprocessing import LabelBinarizer, binarize, label_binarize
 from sklearn.utils._array_api import (
     _average,
     _find_matching_floating_dtype,
+    _fitted_attrs_like,
+    _is_numpy_namespace,
     _logsumexp,
+    _take_classes,
     get_namespace,
     get_namespace_and_device,
     move_to,
@@ -107,13 +110,11 @@ class _BaseNB(ClassifierMixin, BaseEstimator, metaclass=ABCMeta):
             Predicted target values for X.
         """
         check_is_fitted(self)
-        xp, _ = get_namespace(X)
+        xp, _, device = get_namespace_and_device(X)
         X = self._check_X(X)
         jll = self._joint_log_likelihood(X)
         pred_indices = xp.argmax(jll, axis=1)
-        if isinstance(self.classes_[0], str):
-            pred_indices = move_to(pred_indices, xp=np, device="cpu")
-        return self.classes_[pred_indices]
+        return _take_classes(self.classes_, pred_indices, xp=xp, device=device)
 
     def predict_log_proba(self, X):
         """
@@ -433,7 +434,7 @@ class GaussianNB(_BaseNB):
         if sample_weight is not None:
             sample_weight = _check_sample_weight(sample_weight, X, dtype=float_dtype)
 
-        xp_y, _ = get_namespace(y)
+        xp_y, _, device_y = get_namespace_and_device(y)
         # If the ratio of data variance between dimensions is too small, it
         # will cause numerical errors. To address this, we artificially
         # boost the variance by epsilon, a small fraction of the standard
@@ -477,10 +478,21 @@ class GaussianNB(_BaseNB):
             if X.shape[1] != self.theta_.shape[1]:
                 msg = "Number of features %d does not match previous data %d."
                 raise ValueError(msg % (X.shape[1], self.theta_.shape[1]))
+            # The state stored by a previous call is NumPy, it is updated in place
+            # below with arrays from the namespace and device of `X`. Floating point
+            # state is cast to the dtype of non-NumPy `X` like `_fitted_attrs_like`
+            # does, because namespaces like PyTorch do not mix float dtypes.
+            state = move_to(
+                self.theta_, self.var_, self.class_count_, xp=xp, device=device
+            )
+            if not _is_numpy_namespace(xp):
+                state = tuple(xp.astype(a, float_dtype, copy=False) for a in state)
+            self.theta_, self.var_, self.class_count_ = state
             # Put epsilon back in each time
             self.var_[:, :] -= self.epsilon_
 
-        classes = self.classes_
+        # `classes_` is NumPy after a previous call, while `y` may not be.
+        classes = move_to(self.classes_, xp=xp_y, device=device_y)
 
         unique_y = xp_y.unique_values(y)
         unique_y_in_classes = xpx.isin(unique_y, classes, xp=xp_y)
@@ -521,14 +533,14 @@ class GaussianNB(_BaseNB):
         return self
 
     def _joint_log_likelihood(self, X):
-        xp, _ = get_namespace(X)
+        xp, _, device = get_namespace_and_device(X)
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
+        class_prior, theta, var = fitted.class_prior_, fitted.theta_, fitted.var_
         joint_log_likelihood = []
         for i in range(size(self.classes_)):
-            jointi = xp.log(self.class_prior_[i])
-            n_ij = -0.5 * xp.sum(xp.log(2.0 * xp.pi * self.var_[i, :]))
-            n_ij = n_ij - 0.5 * xp.sum(
-                ((X - self.theta_[i, :]) ** 2) / (self.var_[i, :]), axis=1
-            )
+            jointi = xp.log(class_prior[i])
+            n_ij = -0.5 * xp.sum(xp.log(2.0 * xp.pi * var[i, :]))
+            n_ij = n_ij - 0.5 * xp.sum(((X - theta[i, :]) ** 2) / (var[i, :]), axis=1)
             joint_log_likelihood.append(jointi + n_ij)
 
         joint_log_likelihood = xp.stack(joint_log_likelihood).T
