@@ -162,8 +162,6 @@ from sklearn.neural_network import BernoulliRBM, MLPClassifier, MLPRegressor
 from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import (
     KBinsDiscretizer,
-    KernelCenterer,
-    MinMaxScaler,
     OneHotEncoder,
     QuantileTransformer,
     SplineTransformer,
@@ -1127,16 +1125,6 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
             "sample_weight is not equivalent to removing/repeating samples."
         ),
     },
-    KernelCenterer: {
-        "check_array_api_cross_namespace_inference": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-        "check_array_api_cross_namespace_inference_mixed_dtypes": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-    },
     KernelDensity: {
         "check_sample_weight_equivalence_on_dense_data": (
             "sample_weight must have positive values"
@@ -1201,16 +1189,6 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
         ),
         "check_sample_weight_equivalence_on_sparse_data": (
             "sample_weight is not equivalent to removing/repeating samples."
-        ),
-    },
-    MinMaxScaler: {
-        "check_array_api_cross_namespace_inference": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-        "check_array_api_cross_namespace_inference_mixed_dtypes": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
         ),
     },
     NuSVC: {
@@ -1412,16 +1390,6 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
         "check_methods_subset_invariance": "empty array passed inside",
         "check_dont_overwrite_parameters": "empty array passed inside",
         "check_fit2d_predict1d": "empty array passed inside",
-    },
-    StandardScaler: {
-        "check_array_api_cross_namespace_inference": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-        "check_array_api_cross_namespace_inference_mixed_dtypes": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
     },
     SVC: {
         # TODO: fix sample_weight handling of this estimator when probability=False
