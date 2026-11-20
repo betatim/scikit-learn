@@ -17,12 +17,11 @@ from sklearn.cluster import kmeans_plusplus
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.utils import check_random_state
 from sklearn.utils._array_api import (
+    _fitted_attrs_like,
     _is_numpy_namespace,
     _logsumexp,
-    _max_precision_float_dtype,
     get_namespace,
     get_namespace_and_device,
-    move_to,
 )
 from sklearn.utils._param_validation import Interval, StrOptions
 from sklearn.utils.validation import check_is_fitted, validate_data
@@ -225,7 +224,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         labels : array, shape (n_samples,)
             Component labels.
         """
-        xp, _ = get_namespace(X)
+        xp, _, device = get_namespace_and_device(X)
         X = validate_data(self, X, dtype=[xp.float64, xp.float32], ensure_min_samples=2)
         if X.shape[0] < self.n_components:
             raise ValueError(
@@ -252,7 +251,14 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
             if do_init:
                 self._initialize_parameters(X, random_state, xp=xp)
 
-            lower_bound = -xp.inf if do_init else self.lower_bound_
+            if do_init:
+                lower_bound = -xp.inf
+            else:
+                # The previous fit stored the parameters as NumPy arrays,
+                # continue from them in the namespace, device and dtype of X.
+                fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
+                self._set_parameters(self._get_parameters(fitted), xp=xp)
+                lower_bound = fitted.lower_bound_
             current_lower_bounds = []
 
             if self.max_iter == 0:
@@ -344,7 +350,8 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def _get_parameters(self):
+    def _get_parameters(self, fitted=None):
+        """Return the parameters, read from `fitted` or the estimator if None."""
         pass
 
     @abstractmethod
@@ -367,8 +374,11 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         """
         check_is_fitted(self)
         X = validate_data(self, X, reset=False)
-
-        return _logsumexp(self._estimate_weighted_log_prob(X), axis=1)
+        xp, _, device = get_namespace_and_device(X)
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
+        return _logsumexp(
+            self._estimate_weighted_log_prob(X, xp=xp, fitted=fitted), axis=1, xp=xp
+        )
 
     def score(self, X, y=None):
         """Compute the per-sample average log-likelihood of the given data X.
@@ -405,9 +415,12 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
             Component labels.
         """
         check_is_fitted(self)
-        xp, _ = get_namespace(X)
         X = validate_data(self, X, reset=False)
-        return xp.argmax(self._estimate_weighted_log_prob(X), axis=1)
+        xp, _, device = get_namespace_and_device(X)
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
+        return xp.argmax(
+            self._estimate_weighted_log_prob(X, xp=xp, fitted=fitted), axis=1
+        )
 
     def predict_proba(self, X):
         """Evaluate the components' density for each sample.
@@ -425,8 +438,9 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         """
         check_is_fitted(self)
         X = validate_data(self, X, reset=False)
-        xp, _ = get_namespace(X)
-        _, log_resp = self._estimate_log_prob_resp(X, xp=xp)
+        xp, _, device = get_namespace_and_device(X)
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
+        _, log_resp = self._estimate_log_prob_resp(X, xp=xp, fitted=fitted)
         return xp.exp(log_resp)
 
     def sample(self, n_samples=1):
@@ -446,7 +460,6 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
             Component labels.
         """
         check_is_fitted(self)
-        xp, _, device = get_namespace_and_device(self.means_)
 
         if n_samples < 1:
             raise ValueError(
@@ -454,34 +467,27 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
                 "least one sample." % (self.n_components)
             )
 
+        # There is no `X` whose namespace and device the samples could follow,
+        # so they are NumPy arrays, like the fitted attributes they are drawn
+        # from.
         _, n_features = self.means_.shape
         rng = check_random_state(self.random_state)
-        n_samples_comp = rng.multinomial(
-            n_samples, move_to(self.weights_, xp=np, device="cpu")
-        )
+        n_samples_comp = rng.multinomial(n_samples, self.weights_)
 
         if self.covariance_type == "full":
             X = np.vstack(
                 [
                     rng.multivariate_normal(mean, covariance, int(sample))
                     for (mean, covariance, sample) in zip(
-                        move_to(self.means_, xp=np, device="cpu"),
-                        move_to(self.covariances_, xp=np, device="cpu"),
-                        n_samples_comp,
+                        self.means_, self.covariances_, n_samples_comp
                     )
                 ]
             )
         elif self.covariance_type == "tied":
             X = np.vstack(
                 [
-                    rng.multivariate_normal(
-                        mean,
-                        move_to(self.covariances_, xp=np, device="cpu"),
-                        int(sample),
-                    )
-                    for (mean, sample) in zip(
-                        move_to(self.means_, xp=np, device="cpu"), n_samples_comp
-                    )
+                    rng.multivariate_normal(mean, self.covariances_, int(sample))
+                    for (mean, sample) in zip(self.means_, n_samples_comp)
                 ]
             )
         else:
@@ -491,39 +497,49 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
                     + rng.standard_normal(size=(sample, n_features))
                     * np.sqrt(covariance)
                     for (mean, covariance, sample) in zip(
-                        move_to(self.means_, xp=np, device="cpu"),
-                        move_to(self.covariances_, xp=np, device="cpu"),
-                        n_samples_comp,
+                        self.means_, self.covariances_, n_samples_comp
                     )
                 ]
             )
 
-        y = xp.concat(
+        y = np.concatenate(
             [
-                xp.full(int(n_samples_comp[i]), i, dtype=xp.int64, device=device)
-                for i in range(len(n_samples_comp))
+                np.full(int(sample), j, dtype=np.int64)
+                for j, sample in enumerate(n_samples_comp)
             ]
         )
 
-        max_float_dtype = _max_precision_float_dtype(xp=xp, device=device)
-        return xp.asarray(X, dtype=max_float_dtype, device=device), y
+        return np.asarray(X, dtype=np.float64), y
 
-    def _estimate_weighted_log_prob(self, X, xp=None):
+    def _estimate_weighted_log_prob(self, X, xp=None, fitted=None):
         """Estimate the weighted log-probabilities, log P(X | Z) + log weights.
 
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
 
+        fitted : estimator or _FittedAttrsLike, default=None
+            Where to read the fitted attributes from. Inference methods pass a
+            view of the attributes in the namespace of `X`, while fit, where
+            they are already there, uses the estimator itself (None).
+
         Returns
         -------
         weighted_log_prob : array, shape (n_samples, n_component)
         """
-        return self._estimate_log_prob(X, xp=xp) + self._estimate_log_weights(xp=xp)
+        return self._estimate_log_prob(
+            X, xp=xp, fitted=fitted
+        ) + self._estimate_log_weights(xp=xp, fitted=fitted)
 
     @abstractmethod
-    def _estimate_log_weights(self, xp=None):
+    def _estimate_log_weights(self, xp=None, fitted=None):
         """Estimate log-weights in EM algorithm, E[ log pi ] in VB algorithm.
+
+        Parameters
+        ----------
+        fitted : estimator or _FittedAttrsLike, default=None
+            Where to read the fitted attributes from, the estimator itself when
+            None.
 
         Returns
         -------
@@ -532,7 +548,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def _estimate_log_prob(self, X, xp=None):
+    def _estimate_log_prob(self, X, xp=None, fitted=None):
         """Estimate the log-probabilities log P(X | Z).
 
         Compute the log-probabilities per each component for each sample.
@@ -541,13 +557,17 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         ----------
         X : array-like of shape (n_samples, n_features)
 
+        fitted : estimator or _FittedAttrsLike, default=None
+            Where to read the fitted attributes from, the estimator itself when
+            None.
+
         Returns
         -------
         log_prob : array, shape (n_samples, n_component)
         """
         pass
 
-    def _estimate_log_prob_resp(self, X, xp=None):
+    def _estimate_log_prob_resp(self, X, xp=None, fitted=None):
         """Estimate log probabilities and responsibilities for each sample.
 
         Compute the log probabilities, weighted log probabilities per
@@ -558,6 +578,10 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         ----------
         X : array-like of shape (n_samples, n_features)
 
+        fitted : estimator or _FittedAttrsLike, default=None
+            Where to read the fitted attributes from, the estimator itself when
+            None.
+
         Returns
         -------
         log_prob_norm : array, shape (n_samples,)
@@ -567,7 +591,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
             logarithm of the responsibilities
         """
         xp, _ = get_namespace(X, xp=xp)
-        weighted_log_prob = self._estimate_weighted_log_prob(X, xp=xp)
+        weighted_log_prob = self._estimate_weighted_log_prob(X, xp=xp, fitted=fitted)
         log_prob_norm = _logsumexp(weighted_log_prob, axis=1, xp=xp)
 
         # There is no errstate equivalent for warning/error management in array API

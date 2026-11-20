@@ -224,7 +224,11 @@ INIT_PARAMS = {
     FeatureUnion: dict(transformer_list=[("trans1", StandardScaler())]),
     FixedThresholdClassifier: dict(estimator=LogisticRegression()),
     GammaRegressor: dict(max_iter=5),
-    GaussianMixture: dict(n_init=2, max_iter=5),
+    GaussianMixture: [
+        dict(n_init=2, max_iter=5),
+        # Only the random initialisations support the array API.
+        dict(n_init=2, max_iter=5, init_params="random"),
+    ],
     # Due to the jl lemma and often very few samples, the number
     # of components of the random matrix projection will be probably
     # greater than the number of features.

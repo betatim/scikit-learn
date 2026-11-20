@@ -34,6 +34,7 @@ from sklearn.utils._array_api import (
     array_device,
     get_namespace,
     move_to,
+    yield_mixed_namespace_input_permutations,
     yield_namespace_device_dtype_combinations,
 )
 from sklearn.utils._testing import (
@@ -1534,10 +1535,8 @@ def test_gaussian_mixture_array_api_compliance(
 
         gmm_xp.fit(X_xp)
 
-        assert get_namespace(gmm_xp.means_)[0] == xp
-        assert get_namespace(gmm_xp.covariances_)[0] == xp
-        assert array_device(gmm_xp.means_) == array_device(X_xp)
-        assert array_device(gmm_xp.covariances_) == array_device(X_xp)
+        for attr in ["weights_", "means_", "covariances_", "precisions_"]:
+            assert isinstance(getattr(gmm_xp, attr), np.ndarray)
 
         predict_xp = gmm_xp.predict(X_xp)
         predict_proba_xp = gmm_xp.predict_proba(X_xp)
@@ -1551,12 +1550,15 @@ def test_gaussian_mixture_array_api_compliance(
             predict_xp,
             predict_proba_xp,
             score_samples_xp,
-            sample_X_xp,
-            sample_y_xp,
         ]
         for result in results:
             assert get_namespace(result)[0] == xp
             assert array_device(result) == array_device(X_xp)
+
+        # `sample` takes no `X` to follow, so it returns NumPy arrays like the
+        # fitted attributes.
+        assert isinstance(sample_X_xp, np.ndarray)
+        assert isinstance(sample_y_xp, np.ndarray)
 
         for score in [score_xp, aic_xp, bic_xp]:
             assert isinstance(score, float)
@@ -1567,23 +1569,23 @@ def test_gaussian_mixture_array_api_compliance(
     increased_rtol = 1e-3 if dtype_name == "float32" else 1e-7
 
     # Check fitted attributes
-    assert_allclose(gmm.means_, move_to(gmm_xp.means_, xp=np, device="cpu"))
-    assert_allclose(gmm.weights_, move_to(gmm_xp.weights_, xp=np, device="cpu"))
+    assert_allclose(gmm.means_, gmm_xp.means_)
+    assert_allclose(gmm.weights_, gmm_xp.weights_)
     assert_allclose(
         gmm.covariances_,
-        move_to(gmm_xp.covariances_, xp=np, device="cpu"),
+        gmm_xp.covariances_,
         atol=increased_atol,
         rtol=increased_rtol,
     )
     assert_allclose(
         gmm.precisions_cholesky_,
-        move_to(gmm_xp.precisions_cholesky_, xp=np, device="cpu"),
+        gmm_xp.precisions_cholesky_,
         atol=increased_atol,
         rtol=increased_rtol,
     )
     assert_allclose(
         gmm.precisions_,
-        move_to(gmm_xp.precisions_, xp=np, device="cpu"),
+        gmm_xp.precisions_,
         atol=increased_atol,
         rtol=increased_rtol,
     )
@@ -1617,10 +1619,8 @@ def test_gaussian_mixture_array_api_compliance(
     assert_allclose(aic_np, aic_xp, rtol=default_rtol)
     assert_allclose(bic_np, bic_xp, rtol=default_rtol)
     # generated samples are float64 so need explicit rtol when X has dtype float32
-    assert_allclose(
-        sample_X, move_to(sample_X_xp, xp=np, device="cpu"), rtol=default_rtol
-    )
-    assert_allclose(sample_y, move_to(sample_y_xp, xp=np, device="cpu"))
+    assert_allclose(sample_X, sample_X_xp, rtol=default_rtol)
+    assert_allclose(sample_y, sample_y_xp)
 
 
 @skip_if_array_api_compat_not_configured
@@ -1647,3 +1647,147 @@ def test_gaussian_mixture_raises_where_array_api_not_implemented(
             match="Allowed `init_params`.+if 'array_api_dispatch' is enabled",
         ):
             gmm.fit(X)
+
+
+def _fit_namespace_data(namespace_and_device, X):
+    xp, device = _array_api_for_tests(*namespace_and_device)
+    return xp, device, xp.asarray(X, device=device)
+
+
+@pytest.mark.parametrize("covariance_type", COVARIANCE_TYPE)
+@pytest.mark.parametrize(
+    "fit_ns_and_device, infer_ns_and_device, _",
+    yield_mixed_namespace_input_permutations(),
+)
+def test_gaussian_mixture_cross_namespace_inference(
+    covariance_type, fit_ns_and_device, infer_ns_and_device, _
+):
+    """Check the inference methods not run by the common checks across namespaces.
+
+    The model is fitted with one namespace and `score_samples`, `score`, `aic` and
+    `bic` are called with another.
+    """
+    X, _ = make_blobs(n_samples=60, n_features=3, centers=3, random_state=0)
+    # float32 because MPS has no float64.
+    X = X.astype(np.float32)
+    _, _, X_fit = _fit_namespace_data(fit_ns_and_device, X)
+    xp, device, X_infer = _fit_namespace_data(infer_ns_and_device, X)
+
+    gmm = GaussianMixture(
+        n_components=3,
+        covariance_type=covariance_type,
+        init_params="random",
+        max_iter=5,
+        random_state=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        with sklearn.config_context(array_api_dispatch=True):
+            gmm.fit(X_fit)
+
+    with sklearn.config_context(array_api_dispatch=True):
+        score_samples = gmm.score_samples(X_infer)
+        assert get_namespace(score_samples)[0] == xp
+        assert array_device(score_samples) == array_device(X_infer)
+        scores = [gmm.score(X_infer), gmm.aic(X_infer), gmm.bic(X_infer)]
+        assert all(isinstance(score, float) for score in scores)
+
+        expected_score_samples = gmm.score_samples(X)
+        expected_scores = [gmm.score(X), gmm.aic(X), gmm.bic(X)]
+
+    assert_allclose(
+        move_to(score_samples, xp=np, device="cpu"), expected_score_samples, rtol=1e-4
+    )
+    assert_allclose(scores, expected_scores, rtol=1e-4)
+
+
+@pytest.mark.parametrize("covariance_type", COVARIANCE_TYPE)
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
+)
+def test_gaussian_mixture_mixed_dtype_inference(
+    covariance_type, array_namespace, device_name, dtype_name
+):
+    """Check `score_samples` and `score` with a float dtype different from fit."""
+    if dtype_name != "float32":
+        pytest.skip("Inference with float32 after a float64 fit is tested.")
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X, _ = make_blobs(n_samples=60, n_features=3, centers=3, random_state=0)
+
+    gmm = GaussianMixture(
+        n_components=3,
+        covariance_type=covariance_type,
+        init_params="random",
+        max_iter=5,
+        random_state=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        with sklearn.config_context(array_api_dispatch=True):
+            gmm.fit(X)
+    assert gmm.means_.dtype == np.float64
+
+    X_xp = xp.asarray(X.astype(np.float32), device=device)
+    with sklearn.config_context(array_api_dispatch=True):
+        score_samples = gmm.score_samples(X_xp)
+        score = gmm.score(X_xp)
+
+    assert score_samples.dtype == xp.float32
+    assert array_device(score_samples) == array_device(X_xp)
+    assert_allclose(
+        move_to(score_samples, xp=np, device="cpu"), gmm.score_samples(X), rtol=1e-4
+    )
+    assert_allclose(score, gmm.score(X), rtol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
+)
+def test_gaussian_mixture_warm_start_and_init_params_from_numpy(
+    array_namespace, device_name, dtype_name
+):
+    """Check that NumPy state is moved to the namespace of X during fit.
+
+    This covers the NumPy fitted attributes of a previous fit with
+    `warm_start=True`, and NumPy arrays passed as `means_init`, `weights_init` and
+    `precisions_init`.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X, _ = make_blobs(n_samples=60, n_features=3, centers=3, random_state=0)
+    X_xp = xp.asarray(X.astype(dtype_name), device=device)
+
+    gmm = GaussianMixture(
+        n_components=3,
+        init_params="random",
+        max_iter=5,
+        warm_start=True,
+        random_state=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        with sklearn.config_context(array_api_dispatch=True):
+            # The first fit stores float64 NumPy arrays, the second one
+            # continues from them with X in another namespace and dtype.
+            gmm.fit(X)
+            gmm_np = copy.deepcopy(gmm)
+            gmm.fit(X_xp)
+    assert isinstance(gmm.means_, np.ndarray)
+    assert gmm.means_.dtype == np.dtype(dtype_name)
+
+    gmm_init = GaussianMixture(
+        n_components=3,
+        init_params="random",
+        weights_init=gmm_np.weights_,
+        means_init=gmm_np.means_,
+        precisions_init=gmm_np.precisions_,
+        max_iter=5,
+        random_state=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        with sklearn.config_context(array_api_dispatch=True):
+            gmm_init.fit(X_xp)
+    assert isinstance(gmm_init.means_, np.ndarray)
+    assert gmm_init.means_.dtype == np.dtype(dtype_name)
