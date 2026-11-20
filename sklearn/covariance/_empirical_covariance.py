@@ -19,6 +19,7 @@ from sklearn.metrics.pairwise import pairwise_distances
 from sklearn.utils import check_array, metadata_routing
 from sklearn.utils._array_api import (
     _cov,
+    _fitted_attrs_like,
     _is_numpy_namespace,
     get_namespace,
     get_namespace_and_device,
@@ -241,16 +242,21 @@ class EmpiricalCovariance(BaseEstimator):
         -------
         precision_ : array-like of shape (n_features, n_features)
             The precision matrix associated to the current covariance object.
+            It uses the same array library and device as the fitted attributes.
         """
+        xp, _ = get_namespace(self.covariance_)
+        return self._precision_from(self, xp)
+
+    def _precision_from(self, fitted, xp):
+        # `fitted` is either the estimator or a view of its fitted attributes in
+        # the namespace of the data passed to an inference method, so that the
+        # pseudo-inverse is computed there instead of in the namespace of `fit`.
         if self.store_precision:
-            precision = self.precision_
-        else:
-            xp, _ = get_namespace(self.covariance_)
-            if _is_numpy_namespace(xp):
-                precision = linalg.pinvh(self.covariance_, check_finite=False)
-            else:
-                precision = xp.linalg.pinv(self.covariance_)
-        return precision
+            return fitted.precision_
+        covariance = fitted.covariance_
+        if _is_numpy_namespace(xp):
+            return linalg.pinvh(covariance, check_finite=False)
+        return xp.linalg.pinv(covariance)
 
     @_fit_context(prefer_skip_nested_validation=True)
     def fit(self, X, y=None):
@@ -304,11 +310,15 @@ class EmpiricalCovariance(BaseEstimator):
             The log-likelihood of `X_test` with `self.location_` and `self.covariance_`
             as estimators of the Gaussian model mean and covariance matrix respectively.
         """
-        X_test = validate_data(self, X_test, reset=False)
+        xp, _, device = get_namespace_and_device(X_test)
+        X_test = validate_data(
+            self, X_test, reset=False, dtype=supported_float_dtypes(xp, device)
+        )
+        fitted = _fitted_attrs_like(self, X_test, xp=xp, device=device)
         # compute empirical covariance of the test set
-        test_cov = empirical_covariance(X_test - self.location_, assume_centered=True)
+        test_cov = empirical_covariance(X_test - fitted.location_, assume_centered=True)
         # compute log likelihood
-        res = log_likelihood(test_cov, self.get_precision())
+        res = log_likelihood(test_cov, self._precision_from(fitted, xp))
 
         return res
 
@@ -341,9 +351,11 @@ class EmpiricalCovariance(BaseEstimator):
             The Mean Squared Error (in the sense of the Frobenius norm) between
             `self` and `comp_cov` covariance estimators.
         """
+        # `comp_cov` plays the role of `X`: the error is computed in its namespace.
+        xp, _, device = get_namespace_and_device(comp_cov)
+        fitted = _fitted_attrs_like(self, comp_cov, xp=xp, device=device)
         # compute the error
-        xp, _ = get_namespace(comp_cov, self.covariance_)
-        error = comp_cov - self.covariance_
+        error = comp_cov - fitted.covariance_
         # compute the error norm
         if norm == "frobenius":
             squared_norm = float(xp.sum(error**2))
@@ -391,17 +403,19 @@ class EmpiricalCovariance(BaseEstimator):
             self, X, reset=False, dtype=supported_float_dtypes(xp, device)
         )
 
-        precision = self.get_precision()
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
+        location = fitted.location_
+        precision = self._precision_from(fitted, xp)
         if _is_numpy_namespace(xp):
             with config_context(assume_finite=True):
                 # compute mahalanobis distances
                 dist = pairwise_distances(
-                    X, self.location_[np.newaxis, :], metric="mahalanobis", VI=precision
+                    X, location[np.newaxis, :], metric="mahalanobis", VI=precision
                 )
 
             return np.reshape(dist, (len(X),)) ** 2
         else:
             # XXX: pairwise_distances does not support array API with
             # metric="mahalanobis" at the time of writing.
-            X_centered = X - self.location_
+            X_centered = X - location
             return xp.sum((X_centered @ precision) * X_centered, axis=1)

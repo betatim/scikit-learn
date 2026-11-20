@@ -576,6 +576,32 @@ def test_oas_array_api(
     "array_namespace, device_name, dtype_name",
     yield_namespace_device_dtype_combinations(),
 )
+@pytest.mark.parametrize("assume_centered", [True, False])
+def test_ledoit_wolf_array_api(
+    array_namespace, device_name, dtype_name, assume_centered
+):
+    """ledoit_wolf() returns the covariance in the namespace of its input."""
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+
+    X_np = X.astype(dtype_name, copy=False)
+    X_xp = xp.asarray(X_np, device=device)
+
+    covariance_np, shrinkage_np = ledoit_wolf(X_np, assume_centered=assume_centered)
+
+    with config_context(array_api_dispatch=True):
+        covariance_xp, shrinkage_xp = ledoit_wolf(X_xp, assume_centered=assume_centered)
+        assert get_namespace(covariance_xp)[0].__name__ == xp.__name__
+        assert array_device(covariance_xp) == array_device(X_xp)
+        assert covariance_xp.dtype == X_xp.dtype
+    covariance_xp_np = move_to(covariance_xp, xp=np, device="cpu")
+    assert_allclose(covariance_np, covariance_xp_np, atol=_atol_for_type(dtype_name))
+    assert_allclose(shrinkage_np, shrinkage_xp, atol=_atol_for_type(dtype_name))
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
 @pytest.mark.parametrize(
     "check",
     [check_array_api_input_and_values],
@@ -593,3 +619,102 @@ def test_covariance_array_api_compliance(
     check(
         name, estimator, array_namespace, device_name=device_name, dtype_name=dtype_name
     )
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
+)
+@pytest.mark.parametrize("Estimator", [LedoitWolf, OAS])
+@pytest.mark.parametrize("store_precision", [True, False])
+def test_covariance_cross_namespace_inference(
+    array_namespace, device_name, dtype_name, Estimator, store_precision
+):
+    """Inference methods follow the namespace of their input, not that of `fit`.
+
+    `score`, `mahalanobis` and `error_norm` are not called by the common checks.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+
+    X_np = X.astype(dtype_name, copy=False)
+    X_xp = xp.asarray(X_np, device=device)
+    # Downcast because `empirical_covariance` returns float64 for NumPy inputs.
+    comp_cov_np = empirical_covariance(X_np).astype(dtype_name)
+    comp_cov_xp = xp.asarray(comp_cov_np, device=device)
+
+    with config_context(array_api_dispatch=False):
+        est_ref = Estimator(store_precision=store_precision).fit(X_np)
+        score_ref = est_ref.score(X_np)
+        dist_ref = est_ref.mahalanobis(X_np)
+        error_ref = est_ref.error_norm(comp_cov_np)
+
+    atol = _atol_for_type(dtype_name)
+    rtol = 1e-4 if dtype_name == "float32" else 1e-7
+    with config_context(array_api_dispatch=True):
+        est_xp = Estimator(store_precision=store_precision).fit(X_xp)
+        est_np = Estimator(store_precision=store_precision).fit(X_np)
+
+        # Fitted on `xp`, used with NumPy.
+        assert isinstance(est_xp.get_precision(), np.ndarray)
+        dist = est_xp.mahalanobis(X_np)
+        assert isinstance(dist, np.ndarray)
+        assert_allclose(dist, dist_ref, rtol=rtol, atol=atol)
+        assert_allclose(est_xp.score(X_np), score_ref, rtol=rtol, atol=atol)
+        assert_allclose(est_xp.error_norm(comp_cov_np), error_ref, rtol=rtol, atol=atol)
+
+        # Fitted on NumPy, used with `xp`.
+        dist = est_np.mahalanobis(X_xp)
+        assert get_namespace(dist)[0].__name__ == xp.__name__
+        assert array_device(dist) == array_device(X_xp)
+        assert dist.dtype == X_xp.dtype
+        assert_allclose(
+            move_to(dist, xp=np, device="cpu"), dist_ref, rtol=rtol, atol=atol
+        )
+        score = est_np.score(X_xp)
+        assert isinstance(score, float)
+        assert_allclose(score, score_ref, rtol=rtol, atol=atol)
+        assert_allclose(est_np.error_norm(comp_cov_xp), error_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    [
+        combination
+        for combination in yield_namespace_device_dtype_combinations(
+            include_numpy_namespaces=False
+        )
+        if combination[2] == "float32"
+    ],
+)
+@pytest.mark.parametrize("Estimator", [LedoitWolf, OAS])
+@pytest.mark.parametrize("store_precision", [True, False])
+def test_covariance_inference_float32_after_float64_fit(
+    array_namespace, device_name, dtype_name, Estimator, store_precision
+):
+    """Fitted on float64 NumPy data, inference on float32 `xp` data is float32.
+
+    Namespaces like PyTorch do not promote mixed float dtypes, and MPS has no
+    float64, so the fitted attributes have to be cast to the dtype of `X`.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+
+    X_xp = xp.asarray(X.astype(np.float32), device=device)
+
+    with config_context(array_api_dispatch=False):
+        est_ref = Estimator(store_precision=store_precision).fit(X)
+        score_ref = est_ref.score(X)
+        dist_ref = est_ref.mahalanobis(X)
+
+    with config_context(array_api_dispatch=True):
+        est = Estimator(store_precision=store_precision).fit(X)
+        assert est.covariance_.dtype == np.float64
+
+        dist = est.mahalanobis(X_xp)
+        assert get_namespace(dist)[0].__name__ == xp.__name__
+        assert array_device(dist) == array_device(X_xp)
+        assert dist.dtype == X_xp.dtype
+        assert_allclose(move_to(dist, xp=np, device="cpu"), dist_ref, rtol=1e-4)
+
+        score = est.score(X_xp)
+        assert isinstance(score, float)
+        assert_allclose(score, score_ref, rtol=1e-4)
