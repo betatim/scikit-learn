@@ -15,9 +15,10 @@ from sklearn.base import (
 )
 from sklearn.utils._array_api import (
     _add_to_diagonal,
+    _fitted_attrs_like,
     array_device,
-    check_same_namespace,
     get_namespace,
+    get_namespace_and_device,
 )
 from sklearn.utils.validation import check_array, check_is_fitted, validate_data
 
@@ -41,22 +42,29 @@ class _BasePCA(
         Returns
         -------
         cov : array of shape=(n_features, n_features)
-            Estimated covariance of data.
+            Estimated covariance of data. It uses the same array library and
+            device as the fitted attributes.
         """
         xp, _ = get_namespace(self.components_)
+        return self._covariance_from(self, xp)
 
-        components_ = self.components_
-        exp_var = self.explained_variance_
+    def _covariance_from(self, fitted, xp):
+        # `fitted` is either the estimator or a view of its fitted attributes in
+        # the namespace of the data passed to an inference method, so that the
+        # computation happens there instead of in the namespace of `fit`.
+        components_ = fitted.components_
+        exp_var = fitted.explained_variance_
+        noise_variance = fitted.noise_variance_
         if self.whiten:
             components_ = components_ * xp.sqrt(exp_var[:, np.newaxis])
-        exp_var_diff = exp_var - self.noise_variance_
+        exp_var_diff = exp_var - noise_variance
         exp_var_diff = xp.where(
-            exp_var > self.noise_variance_,
+            exp_var > noise_variance,
             exp_var_diff,
             xp.asarray(0.0, device=array_device(exp_var), dtype=exp_var.dtype),
         )
         cov = (components_.T * exp_var_diff) @ components_
-        _add_to_diagonal(cov, self.noise_variance_, xp)
+        _add_to_diagonal(cov, noise_variance, xp)
         return cov
 
     def get_precision(self):
@@ -68,40 +76,52 @@ class _BasePCA(
         Returns
         -------
         precision : array, shape=(n_features, n_features)
-            Estimated precision of data.
+            Estimated precision of data. It uses the same array library and
+            device as the fitted attributes.
         """
         xp, is_array_api_compliant = get_namespace(self.components_)
+        return self._precision_from(self, xp, is_array_api_compliant)
 
+    def _precision_from(self, fitted, xp, is_array_api_compliant):
+        # See `_covariance_from` for what `fitted` is.
         n_features = self.components_.shape[1]
+        components_ = fitted.components_
 
         # handle corner cases first
         if self.n_components_ == 0:
-            return xp.eye(n_features) / self.noise_variance_
+            return (
+                xp.eye(
+                    n_features,
+                    dtype=components_.dtype,
+                    device=array_device(components_),
+                )
+                / fitted.noise_variance_
+            )
 
         if is_array_api_compliant:
             linalg_inv = xp.linalg.inv
         else:
             linalg_inv = linalg.inv
 
-        if self.noise_variance_ == 0.0:
-            return linalg_inv(self.get_covariance())
+        noise_variance = fitted.noise_variance_
+        if noise_variance == 0.0:
+            return linalg_inv(self._covariance_from(fitted, xp))
 
         # Get precision using matrix inversion lemma
-        components_ = self.components_
-        exp_var = self.explained_variance_
+        exp_var = fitted.explained_variance_
         if self.whiten:
             components_ = components_ * xp.sqrt(exp_var[:, np.newaxis])
-        exp_var_diff = exp_var - self.noise_variance_
+        exp_var_diff = exp_var - noise_variance
         exp_var_diff = xp.where(
-            exp_var > self.noise_variance_,
+            exp_var > noise_variance,
             exp_var_diff,
-            xp.asarray(0.0, device=array_device(exp_var)),
+            xp.asarray(0.0, device=array_device(exp_var), dtype=exp_var.dtype),
         )
-        precision = components_ @ components_.T / self.noise_variance_
+        precision = components_ @ components_.T / noise_variance
         _add_to_diagonal(precision, 1.0 / exp_var_diff, xp)
         precision = components_.T @ linalg_inv(precision) @ components_
-        precision /= -(self.noise_variance_**2)
-        _add_to_diagonal(precision, 1.0 / self.noise_variance_, xp)
+        precision /= -(noise_variance**2)
+        _add_to_diagonal(precision, 1.0 / noise_variance, xp)
         return precision
 
     @abstractmethod
@@ -140,8 +160,7 @@ class _BasePCA(
             Projection of X in the first principal components, where `n_samples`
             is the number of samples and `n_components` is the number of the components.
         """
-        check_same_namespace(X, self, attribute="components_", method="transform")
-        xp, _ = get_namespace(X)
+        xp, _, device = get_namespace_and_device(X)
 
         check_is_fitted(self)
 
@@ -152,23 +171,28 @@ class _BasePCA(
             accept_sparse=("csr", "csc"),
             reset=False,
         )
-        return self._transform(X, xp=xp, x_is_centered=False)
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
+        return self._transform(X, fitted, xp=xp, x_is_centered=False)
 
-    def _transform(self, X, xp, x_is_centered=False):
-        X_transformed = X @ self.components_.T
+    def _transform(self, X, fitted, xp, x_is_centered=False):
+        # `fitted` is a view of the fitted attributes in the namespace of `X`, or
+        # the estimator itself in `fit_transform`, where the attributes have not
+        # been converted to NumPy yet.
+        components_ = fitted.components_
+        X_transformed = X @ components_.T
         if not x_is_centered:
             # Apply the centering after the projection.
             # For dense X this avoids copying or mutating the data passed by
             # the caller.
             # For sparse X it keeps sparsity and avoids having to wrap X into
             # a linear operator.
-            X_transformed -= xp.reshape(self.mean_, (1, -1)) @ self.components_.T
+            X_transformed -= xp.reshape(fitted.mean_, (1, -1)) @ components_.T
         if self.whiten:
             # For some solvers (such as "arpack" and "covariance_eigh"), on
             # rank deficient data, some components can have a variance
             # arbitrarily close to zero, leading to non-finite results when
             # whitening. To avoid this problem we clip the variance below.
-            scale = xp.sqrt(self.explained_variance_)
+            scale = xp.sqrt(fitted.explained_variance_)
             min_scale = xp.finfo(scale.dtype).eps
             scale[scale < min_scale] = min_scale
             X_transformed /= scale
@@ -196,22 +220,20 @@ class _BasePCA(
         If whitening is enabled, inverse_transform will compute the
         exact inverse operation, which includes reversing whitening.
         """
-        check_same_namespace(
-            X, self, attribute="components_", method="inverse_transform"
-        )
-        xp, _ = get_namespace(X)
+        xp, _, device = get_namespace_and_device(X)
 
         check_is_fitted(self)
 
         X = check_array(X, input_name="X", dtype=[xp.float64, xp.float32])
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
 
         if self.whiten:
             scaled_components = (
-                xp.sqrt(self.explained_variance_[:, np.newaxis]) * self.components_
+                xp.sqrt(fitted.explained_variance_[:, np.newaxis]) * fitted.components_
             )
-            return X @ scaled_components + self.mean_
+            return X @ scaled_components + fitted.mean_
         else:
-            return X @ self.components_ + self.mean_
+            return X @ fitted.components_ + fitted.mean_
 
     @property
     def _n_features_out(self):

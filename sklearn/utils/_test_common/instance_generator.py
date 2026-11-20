@@ -1259,16 +1259,6 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
             "sample_weight is not equivalent to removing/repeating samples."
         ),
     },
-    PCA: {
-        "check_array_api_cross_namespace_inference": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-        "check_array_api_cross_namespace_inference_mixed_dtypes": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-    },
     Perceptron: {
         # TODO: replace by a statistical test, see meta-issue #16298
         "check_sample_weight_equivalence_on_dense_data": (
