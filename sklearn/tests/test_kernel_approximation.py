@@ -379,15 +379,63 @@ def test_nystroem_approximation_array_api(
         X_xp_transformed = nystroem.fit_transform(X_xp)
         X_xp_transformed_np = move_to(X_xp_transformed, xp=np, device="cpu")
 
-        for attribute_name in ["components_", "normalization_"]:
-            xp_attr, _, device_attr = get_namespace_and_device(
-                getattr(nystroem, attribute_name)
-            )
-            assert xp_attr is xp
-            assert device_attr == array_device(X_xp)
+        assert get_namespace_and_device(X_xp_transformed)[0] is xp
+        assert array_device(X_xp_transformed) == array_device(X_xp)
+
+    for attribute_name in ["components_", "normalization_", "component_indices_"]:
+        assert isinstance(getattr(nystroem, attribute_name), np.ndarray)
 
     atol = _atol_for_type(dtype_name)
     assert_allclose(X_np_transformed, X_xp_transformed_np, atol=atol)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+@pytest.mark.parametrize("fit_on_xp", [True, False])
+def test_nystroem_callable_kernel_cross_namespace(
+    array_namespace, device_name, dtype_name, fit_on_xp
+):
+    """A callable kernel receives arrays in the namespace and device of `X`.
+
+    This holds in `transform` too, where the second argument comes from the
+    fitted `components_`, which are stored as NumPy arrays.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    rng = np.random.RandomState(0)
+    X_np = rng.uniform(size=(6, 3)).astype(dtype_name)
+    X_xp = xp.asarray(X_np, device=device)
+
+    seen = []
+
+    def kernel(x, y):
+        seen.append((get_namespace_and_device(x, y), x.dtype, y.dtype))
+        return x @ y
+
+    nystroem = Nystroem(kernel=kernel, n_components=3, random_state=0)
+    X_fit, X_transform = (X_xp, X_np) if fit_on_xp else (X_np, X_xp)
+    with config_context(array_api_dispatch=True):
+        nystroem.fit(X_fit)
+        seen.clear()
+        X_transformed = nystroem.transform(X_transform)
+        xp_out, _, device_out = get_namespace_and_device(X_transformed)
+        xp_in, _, device_in = get_namespace_and_device(X_transform)
+        assert xp_out is xp_in
+        assert device_out == device_in
+        assert seen
+        for (xp_k, _, device_k), x_dtype, y_dtype in seen:
+            assert xp_k is xp_in
+            assert device_k == device_in
+            assert x_dtype == y_dtype == X_transform.dtype
+
+    with config_context(array_api_dispatch=False):
+        expected = nystroem.transform(X_np)
+    assert_allclose(
+        move_to(X_transformed, xp=np, device="cpu"),
+        expected,
+        atol=_atol_for_type(dtype_name),
+    )
 
 
 def test_nystroem_default_parameters():
