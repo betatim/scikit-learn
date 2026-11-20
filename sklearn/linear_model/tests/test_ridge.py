@@ -6,7 +6,7 @@ import pytest
 from scipy import linalg
 
 from sklearn import config_context, datasets
-from sklearn.base import clone
+from sklearn.base import clone, is_classifier
 from sklearn.datasets import (
     make_classification,
     make_low_rank_matrix,
@@ -44,6 +44,7 @@ from sklearn.utils import check_random_state
 from sklearn.utils._array_api import (
     _NUMPY_NAMESPACE_NAMES,
     _atol_for_type,
+    array_device,
     move_to,
     yield_namespace_device_dtype_combinations,
     yield_namespaces,
@@ -1468,21 +1469,25 @@ def check_array_api_attributes(
     with config_context(array_api_dispatch=True):
         estimator_xp = clone(estimator).fit(X_iris_xp, y_iris_xp)
         coef_xp = estimator_xp.coef_
+        assert isinstance(coef_xp, np.ndarray)
         assert coef_xp.shape == coef_np.shape
-        assert coef_xp.dtype == X_iris_xp.dtype
+        assert coef_xp.dtype == X_iris_np.dtype
 
         assert_allclose(
-            move_to(coef_xp, xp=np, device="cpu"),
+            coef_xp,
             coef_np,
             rtol=rtol,
             atol=_atol_for_type(dtype_name),
         )
         intercept_xp = estimator_xp.intercept_
+        # A NumPy fit gives a NumPy scalar, a fit with another namespace a 0-d
+        # array.
+        assert isinstance(intercept_xp, (np.ndarray, np.generic))
         assert intercept_xp.shape == intercept_np.shape
-        assert intercept_xp.dtype == X_iris_xp.dtype
+        assert intercept_xp.dtype == X_iris_np.dtype
 
         assert_allclose(
-            move_to(intercept_xp, xp=np, device="cpu"),
+            intercept_xp,
             intercept_np,
             rtol=rtol,
             atol=_atol_for_type(dtype_name),
@@ -1548,7 +1553,8 @@ def test_ridge_classifier_multilabel_array_api(
         pred_xp = ridge_xp.predict(X_xp)
         assert pred_xp.shape == pred_np.shape == y.shape
         assert_allclose(move_to(pred_xp, xp=np, device="cpu"), pred_np)
-        assert_array_equal(move_to(ridge_xp.classes_, xp=np, device="cpu"), classes_np)
+        assert isinstance(ridge_xp.classes_, np.ndarray)
+        assert_array_equal(ridge_xp.classes_, classes_np)
 
 
 @pytest.mark.parametrize(
@@ -1684,16 +1690,17 @@ def test_ridge_cholesky_array_api(
         ridge_xp = clone(ridge).fit(X_xp, y_xp, sample_weight=sw_xp)
 
     assert ridge_xp.solver_ == "cholesky"
-    assert ridge_xp.coef_.dtype == X_xp.dtype
+    assert isinstance(ridge_xp.coef_, np.ndarray)
+    assert ridge_xp.coef_.dtype == X_np.dtype
     rtol = 1e-3 if dtype_name == "float32" else 1e-7
     assert_allclose(
-        move_to(ridge_xp.coef_, xp=np, device="cpu"),
+        ridge_xp.coef_,
         ridge_np.coef_,
         rtol=rtol,
         atol=_atol_for_type(dtype_name),
     )
     assert_allclose(
-        move_to(ridge_xp.intercept_, xp=np, device="cpu"),
+        ridge_xp.intercept_,
         ridge_np.intercept_,
         rtol=rtol,
         atol=_atol_for_type(dtype_name),
@@ -1722,7 +1729,7 @@ def test_ridge_cholesky_singular_array_api(
         ridge = Ridge(alpha=0.0, solver="cholesky", fit_intercept=False)
         ridge.fit(X_xp, y_xp)
         assert ridge.solver_ == "svd"
-        assert bool(xp.all(xp.isfinite(ridge.coef_)))
+        assert np.all(np.isfinite(ridge.coef_))
 
 
 @pytest.mark.parametrize("array_namespace", sorted(_NUMPY_NAMESPACE_NAMES))
@@ -2805,3 +2812,73 @@ def test_set_score_request_with_default_scoring(metaestimator, make_dataset):
 
 # End of Metadata Routing Tests
 # =============================
+
+
+@pytest.mark.parametrize(
+    "estimator",
+    [Ridge(), RidgeCV(), RidgeClassifier(), RidgeClassifierCV()],
+    ids=_get_check_estimator_ids,
+)
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
+)
+def test_ridge_score_cross_namespace(
+    estimator, array_namespace, device_name, dtype_name
+):
+    """Check that `score` works with a namespace and float dtype other than fit's.
+
+    `score` is not covered by the common array API checks.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X_np = X_iris.astype(np.float64)
+    y_np = y_iris if is_classifier(estimator) else y_iris.astype(np.float64)
+    X_xp = xp.asarray(X_np.astype(dtype_name), device=device)
+    if is_classifier(estimator):
+        y_xp = xp.asarray(y_np, device=device)
+    else:
+        y_xp = xp.asarray(y_np.astype(dtype_name), device=device)
+    rtol = 1e-4 if dtype_name == "float32" else 1e-7
+
+    estimator_np = clone(estimator).fit(X_np, y_np)
+    score_np = estimator_np.score(X_np, y_np)
+
+    with config_context(array_api_dispatch=True):
+        # Fit on NumPy float64, score on `xp`, possibly float32.
+        assert_allclose(float(estimator_np.score(X_xp, y_xp)), score_np, rtol=rtol)
+
+        # Fit on `xp`, score on NumPy float64 and float32.
+        estimator_xp = clone(estimator).fit(X_xp, y_xp)
+        for dtype in (np.float64, np.float32):
+            score = estimator_xp.score(X_np.astype(dtype), y_np)
+            assert_allclose(float(score), score_np, rtol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "estimator", [RidgeClassifier(solver="svd"), RidgeClassifierCV()]
+)
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
+)
+def test_ridge_classifier_multilabel_cross_namespace(
+    estimator, array_namespace, device_name, dtype_name
+):
+    """Check multilabel `predict`, which goes through the nested `LabelBinarizer`,
+    with a namespace other than fit's."""
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X, y = make_multilabel_classification(random_state=0)
+    X_xp = xp.asarray(X.astype(dtype_name), device=device)
+    y_xp = xp.asarray(y.astype(dtype_name), device=device)
+
+    pred_np = clone(estimator).fit(X, y).predict(X)
+
+    with config_context(array_api_dispatch=True):
+        ridge_xp = clone(estimator).fit(X_xp, y_xp)
+        assert isinstance(ridge_xp._label_binarizer.classes_, np.ndarray)
+        assert_array_equal(ridge_xp.predict(X), pred_np)
+
+        ridge_np = clone(estimator).fit(X, y)
+        pred_xp = ridge_np.predict(X_xp)
+        assert array_device(pred_xp) == array_device(X_xp)
+        assert_array_equal(move_to(pred_xp, xp=np, device="cpu"), pred_np)

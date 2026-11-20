@@ -30,9 +30,9 @@ from sklearn.linear_model._linear_loss import LinearModelLoss
 from sklearn.utils import check_array
 from sklearn.utils._array_api import (
     _average,
+    _fitted_attrs_like,
     _is_numpy_namespace,
     _matching_numpy_dtype,
-    get_namespace,
     get_namespace_and_device,
     move_to,
 )
@@ -485,6 +485,11 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
             self.intercept_ = xp.asarray(0.0, dtype=X.dtype, device=device)
             self.coef_ = coef
 
+        # The loss used by the solver can be tied to the namespace and device of
+        # `X`. Inference builds its own loss for the namespace of its input, so
+        # keep the NumPy version, which does not reference a namespace or device
+        # that may not be available when the estimator is used or unpickled.
+        self._base_loss = self._get_loss()
         return self
 
     def _linear_predictor(self, X):
@@ -502,7 +507,7 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
         y_pred : array of shape (n_samples,)
             Returns predicted values of linear predictor.
         """
-        xp, _ = get_namespace(X)
+        xp, _, device = get_namespace_and_device(X)
         check_is_fitted(self)
         X = validate_data(
             self,
@@ -513,7 +518,15 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
             allow_nd=False,
             reset=False,
         )
-        return X @ self.coef_ + self.intercept_
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
+        return X @ fitted.coef_ + fitted.intercept_
+
+    def _loss_like(self, X):
+        """Return the loss of this GLM in the namespace and device of `X`."""
+        xp, _, device = get_namespace_and_device(X)
+        if _is_numpy_namespace(xp):
+            return self._base_loss
+        return self._get_loss(xp=xp, device=device)
 
     def predict(self, X):
         """Predict using GLM with feature matrix X.
@@ -530,7 +543,7 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
         """
         # check_array is done in _linear_predictor
         raw_prediction = self._linear_predictor(X)
-        y_pred = self._base_loss.link.inverse(raw_prediction)
+        y_pred = self._loss_like(raw_prediction).link.inverse(raw_prediction)
         return y_pred
 
     def score(self, X, y, sample_weight=None):
@@ -583,7 +596,7 @@ class _GeneralizedLinearRegressor(RegressorMixin, BaseEstimator):
             # losses.
             sample_weight = _check_sample_weight(sample_weight, X, dtype=y.dtype)
 
-        base_loss = self._base_loss
+        base_loss = self._loss_like(raw_prediction)
 
         if not base_loss.in_y_true_range(y):
             raise ValueError(

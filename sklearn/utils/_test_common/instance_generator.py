@@ -1288,16 +1288,6 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
             "Therefore this test is x-fail until we fix this."
         ),
     },
-    PoissonRegressor: {
-        "check_array_api_cross_namespace_inference": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-        "check_array_api_cross_namespace_inference_mixed_dtypes": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-    },
     QuantileTransformer: {
         "check_sample_weight_equivalence_on_sparse_data": (
             "QuantileTransformer does not yet support sample_weight on sparse data."
