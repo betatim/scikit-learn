@@ -1,9 +1,11 @@
+import pickle
 import warnings
 
 import numpy as np
 import pytest
 from scipy import linalg
 
+from sklearn import config_context
 from sklearn.cluster import KMeans
 from sklearn.covariance import (
     EmpiricalCovariance,
@@ -11,7 +13,7 @@ from sklearn.covariance import (
     ShrunkCovariance,
     ledoit_wolf,
 )
-from sklearn.datasets import make_blobs
+from sklearn.datasets import make_blobs, make_classification
 from sklearn.discriminant_analysis import (
     LinearDiscriminantAnalysis,
     QuadraticDiscriminantAnalysis,
@@ -20,7 +22,13 @@ from sklearn.discriminant_analysis import (
 from sklearn.model_selection import ShuffleSplit, cross_val_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils import check_random_state
+from sklearn.utils._array_api import (
+    _atol_for_type,
+    move_to,
+    yield_namespace_device_dtype_combinations,
+)
 from sklearn.utils._testing import (
+    _array_api_for_tests,
     _convert_container,
     assert_allclose,
     assert_almost_equal,
@@ -536,6 +544,73 @@ def test_lda_numeric_consistency_float32_float64():
         # Check value consistency between types
         rtol = 1e-6
         assert_allclose(clf_32.coef_, clf_64.coef_, rtol=rtol)
+
+
+def test_lda_predict_log_proba_binary_float32():
+    """Confident binary predictions keep their log probability in float32.
+
+    `1 - expit(decision)` used to round to 0 in float32, which turned a log
+    probability of about -17 into `log(smallest_normal)`, about -87.
+    """
+    X_, y_ = make_classification(n_samples=30, n_features=10, random_state=42)
+    clf_64 = LinearDiscriminantAnalysis().fit(X_, y_)
+    clf_32 = LinearDiscriminantAnalysis().fit(X_.astype(np.float32), y_)
+
+    log_proba_64 = clf_64.predict_log_proba(X_)
+    assert log_proba_64.min() < -15
+    log_proba_32 = clf_32.predict_log_proba(X_.astype(np.float32))
+    assert_allclose(log_proba_32, log_proba_64, rtol=1e-3, atol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+def test_lda_array_api_score_cross_namespace(array_namespace, device_name, dtype_name):
+    """`score` works with a namespace and float dtype other than the ones of fit.
+
+    The common checks do not call `score`.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X_np, y_np = make_classification(
+        n_samples=60, n_features=5, n_informative=3, n_classes=3, random_state=0
+    )
+    X_np = X_np.astype(dtype_name)
+    X_xp = xp.asarray(X_np, device=device)
+    y_xp = xp.asarray(y_np, device=device)
+
+    # Fitted on float64 NumPy data, scored on `xp` data with `dtype_name`.
+    lda_np = LinearDiscriminantAnalysis().fit(X_np.astype(np.float64), y_np)
+    expected = lda_np.score(X_np, y_np)
+    with config_context(array_api_dispatch=True):
+        assert lda_np.score(X_xp, y_xp) == pytest.approx(expected)
+
+        # Fitted on `xp` data, scored on NumPy data.
+        lda_xp = LinearDiscriminantAnalysis().fit(X_xp, y_xp)
+        assert lda_xp.score(X_np, y_np) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+def test_lda_array_api_pickle(array_namespace, device_name, dtype_name):
+    """An estimator fitted on `xp` data pickles and predicts after unpickling."""
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X_np, y_np = make_classification(
+        n_samples=60, n_features=5, n_informative=3, n_classes=3, random_state=0
+    )
+    X_xp = xp.asarray(X_np.astype(dtype_name), device=device)
+    y_xp = xp.asarray(y_np, device=device)
+
+    with config_context(array_api_dispatch=True):
+        lda = LinearDiscriminantAnalysis().fit(X_xp, y_xp)
+        expected = move_to(lda.predict_proba(X_xp), xp=np, device="cpu")
+        lda_unpickled = pickle.loads(pickle.dumps(lda))
+        result = lda_unpickled.predict_proba(X_xp)
+        assert result.device == X_xp.device
+        result = move_to(result, xp=np, device="cpu")
+    assert_allclose(result, expected, atol=_atol_for_type(dtype_name))
 
 
 @pytest.mark.parametrize("solver", ["svd", "eigen"])
