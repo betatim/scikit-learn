@@ -763,7 +763,7 @@ def multilabel_confusion_matrix(
         le.fit(labels)
         y_true = le.transform(y_true)
         y_pred = le.transform(y_pred)
-        sorted_labels = le.classes_
+        sorted_labels = move_to(le.classes_, xp=xp, device=device)
 
         # labels are now from 0 to len(labels) - 1 -> use bincount
         tp = y_true == y_pred

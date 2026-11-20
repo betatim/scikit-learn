@@ -14,8 +14,9 @@ from sklearn.base import BaseEstimator, TransformerMixin, _fit_context
 from sklearn.utils import _align_api_if_sparse, column_or_1d
 from sklearn.utils._array_api import (
     _find_matching_floating_dtype,
+    _fitted_attrs_like,
     _is_numpy_namespace,
-    array_device,
+    _take_classes,
     get_namespace,
     get_namespace_and_device,
     indexing_dtype,
@@ -84,6 +85,9 @@ class LabelEncoder(TransformerMixin, BaseEstimator, auto_wrap_output_keys=None):
     [np.str_('tokyo'), np.str_('tokyo'), np.str_('paris')]
     """
 
+    _parameter_constraints: dict = {}
+
+    @_fit_context(prefer_skip_nested_validation=True)
     def fit(self, y):
         """Fit label encoder.
 
@@ -101,6 +105,7 @@ class LabelEncoder(TransformerMixin, BaseEstimator, auto_wrap_output_keys=None):
         self.classes_ = _unique(y)
         return self
 
+    @_fit_context(prefer_skip_nested_validation=True)
     def fit_transform(self, y):
         """Fit label encoder and return encoded labels.
 
@@ -132,13 +137,16 @@ class LabelEncoder(TransformerMixin, BaseEstimator, auto_wrap_output_keys=None):
             Labels as normalized encodings.
         """
         check_is_fitted(self)
-        xp, _ = get_namespace(y)
-        y = column_or_1d(y, dtype=self.classes_.dtype, warn=True)
+        xp, _, device = get_namespace_and_device(y)
+        # `y` is cast to the dtype of `classes_`, so `classes_` has to be in the
+        # namespace of `y` before `y` is validated.
+        classes = _fitted_attrs_like(self, y, xp=xp, device=device).classes_
+        y = column_or_1d(y, dtype=classes.dtype, warn=True)
         # transform of empty array is empty array
         if _num_samples(y) == 0:
-            return xp.asarray([])
+            return xp.asarray([], device=device)
 
-        return _encode_labels(y, uniques=self.classes_)
+        return _encode_labels(y, uniques=classes)
 
     def inverse_transform(self, y):
         """Transform labels back to original encoding.
@@ -154,21 +162,21 @@ class LabelEncoder(TransformerMixin, BaseEstimator, auto_wrap_output_keys=None):
             Original encoding.
         """
         check_is_fitted(self)
-        xp, _ = get_namespace(y)
+        xp, _, device = get_namespace_and_device(y)
         y = column_or_1d(y, warn=True)
         # inverse transform of empty array is empty array
         if _num_samples(y) == 0:
-            return xp.asarray([])
+            return xp.asarray([], device=device)
 
         diff = xpx.setdiff1d(
             y,
-            xp.arange(self.classes_.shape[0], device=array_device(y)),
+            xp.arange(self.classes_.shape[0], device=device),
             xp=xp,
         )
         if diff.shape[0]:
             raise ValueError("y contains previously unseen labels: %s" % str(diff))
         y = xp.asarray(y)
-        return xp.take(self.classes_, y, axis=0)
+        return _take_classes(self.classes_, y, xp=xp, device=device)
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()

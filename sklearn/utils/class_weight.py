@@ -72,7 +72,10 @@ def compute_class_weight(class_weight, *, classes, y, sample_weight=None):
     # Import error caused by circular imports.
     from sklearn.preprocessing import LabelEncoder
 
-    xp, _, device = get_namespace_and_device(y, classes)
+    xp, _, device = get_namespace_and_device(y)
+    # `classes` is usually the NumPy `classes_` of an estimator, while `y` can be
+    # in any namespace.
+    classes = move_to(classes, xp=xp, device=device)
     unique_y = xp.unique_values(y)
     if set(move_to(unique_y, xp=np, device="cpu")) - set(
         move_to(classes, xp=np, device="cpu")
@@ -85,7 +88,13 @@ def compute_class_weight(class_weight, *, classes, y, sample_weight=None):
         # Find the weight of each class as present in y.
         le = LabelEncoder()
         y_ind = le.fit_transform(y)
-        if not all(xpx.isin(classes, xp.astype(le.classes_, classes.dtype), xp=xp)):
+        if not all(
+            xpx.isin(
+                classes,
+                xp.astype(move_to(le.classes_, xp=xp, device=device), classes.dtype),
+                xp=xp,
+            )
+        ):
             raise ValueError("classes should have valid labels that are in y")
 
         if _is_numpy_namespace(xp) and sample_weight is not None:
