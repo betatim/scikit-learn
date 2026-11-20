@@ -13,9 +13,11 @@ from sklearn.utils import check_array
 from sklearn.utils._array_api import (
     _add_to_diagonal,
     _cholesky,
+    _is_numpy_namespace,
     _linalg_solve,
     get_namespace,
     get_namespace_and_device,
+    move_to,
 )
 from sklearn.utils._param_validation import StrOptions
 from sklearn.utils.extmath import row_norms
@@ -39,6 +41,7 @@ def _check_weights(weights, n_components, xp=None):
     -------
     weights : array, shape (n_components,)
     """
+    xp, _ = get_namespace(weights, xp=xp)
     weights = check_array(weights, dtype=[xp.float64, xp.float32], ensure_2d=False)
     _check_shape(weights, (n_components,), "weights")
 
@@ -159,6 +162,17 @@ def _check_precisions(precisions, covariance_type, n_components, n_features, xp=
     }
     _check_precisions[covariance_type](precisions, covariance_type, xp=xp)
     return precisions
+
+
+def _like_X(array, X):
+    """Move an initial parameter to the namespace, device and dtype of X."""
+    xp, _, device = get_namespace_and_device(X)
+    array = move_to(array, xp=xp, device=device)
+    # Like `_fitted_attrs_like`: namespaces other than NumPy do not promote
+    # mixed float dtypes.
+    if not _is_numpy_namespace(xp):
+        array = xp.astype(array, X.dtype)
+    return array
 
 
 ###############################################################################
@@ -802,14 +816,15 @@ class GaussianMixture(BaseMixture):
         """Check the Gaussian mixture parameters are well defined."""
         _, n_features = X.shape
 
+        # The initial parameters are validated in their own namespace, which
+        # can differ from the one of X, for example when they are the NumPy
+        # fitted attributes of another model. `_initialize` moves them.
         if self.weights_init is not None:
-            self.weights_init = _check_weights(
-                self.weights_init, self.n_components, xp=xp
-            )
+            self.weights_init = _check_weights(self.weights_init, self.n_components)
 
         if self.means_init is not None:
             self.means_init = _check_means(
-                self.means_init, self.n_components, n_features, xp=xp
+                self.means_init, self.n_components, n_features
             )
 
         if self.precisions_init is not None:
@@ -818,7 +833,6 @@ class GaussianMixture(BaseMixture):
                 self.covariance_type,
                 self.n_components,
                 n_features,
-                xp=xp,
             )
 
         allowed_init_params = ["random", "random_from_data"]
@@ -866,10 +880,10 @@ class GaussianMixture(BaseMixture):
             if self.weights_init is None:
                 weights /= n_samples
 
-        self.weights_ = weights if self.weights_init is None else self.weights_init
-        self.weights_ = xp.asarray(self.weights_, device=device)
-
-        self.means_ = means if self.means_init is None else self.means_init
+        self.weights_ = (
+            weights if self.weights_init is None else _like_X(self.weights_init, X)
+        )
+        self.means_ = means if self.means_init is None else _like_X(self.means_init, X)
 
         if self.precisions_init is None:
             self.covariances_ = covariances
@@ -878,7 +892,7 @@ class GaussianMixture(BaseMixture):
             )
         else:
             self.precisions_cholesky_ = _compute_precision_cholesky_from_precisions(
-                self.precisions_init, self.covariance_type, xp=xp
+                _like_X(self.precisions_init, X), self.covariance_type, xp=xp
             )
 
     def _m_step(self, X, log_resp, xp=None):
@@ -901,24 +915,28 @@ class GaussianMixture(BaseMixture):
             self.covariances_, self.covariance_type, xp=xp
         )
 
-    def _estimate_log_prob(self, X, xp=None):
+    def _estimate_log_prob(self, X, xp=None, fitted=None):
+        fitted = self if fitted is None else fitted
         return _estimate_log_gaussian_prob(
-            X, self.means_, self.precisions_cholesky_, self.covariance_type, xp=xp
+            X, fitted.means_, fitted.precisions_cholesky_, self.covariance_type, xp=xp
         )
 
-    def _estimate_log_weights(self, xp=None):
-        xp, _ = get_namespace(self.weights_, xp=xp)
-        return xp.log(self.weights_)
+    def _estimate_log_weights(self, xp=None, fitted=None):
+        fitted = self if fitted is None else fitted
+        weights = fitted.weights_
+        xp, _ = get_namespace(weights, xp=xp)
+        return xp.log(weights)
 
     def _compute_lower_bound(self, _, log_prob_norm):
         return log_prob_norm
 
-    def _get_parameters(self):
+    def _get_parameters(self, fitted=None):
+        fitted = self if fitted is None else fitted
         return (
-            self.weights_,
-            self.means_,
-            self.covariances_,
-            self.precisions_cholesky_,
+            fitted.weights_,
+            fitted.means_,
+            fitted.covariances_,
+            fitted.precisions_cholesky_,
         )
 
     def _set_parameters(self, params, xp=None):
