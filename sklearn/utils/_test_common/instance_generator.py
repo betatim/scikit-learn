@@ -179,6 +179,7 @@ from sklearn.semi_supervised import (
 from sklearn.svm import SVC, SVR, LinearSVC, LinearSVR, NuSVC, NuSVR, OneClassSVM
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.utils import all_estimators
+from sklearn.utils._array_api import _NUMPY_FITTED_ATTRS
 from sklearn.utils._tags import get_tags
 from sklearn.utils._testing import SkipTest
 from sklearn.utils.fixes import _IS_32BIT, parse_version, sp_base_version
@@ -1019,13 +1020,15 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
         "check_methods_sample_order_invariance": "fails for the predict method",
     },
     FeatureUnion: {
+        # TODO(#34604): remove once StandardScaler stores its fitted attributes as
+        # NumPy, FeatureUnion itself has no fitted arrays.
         "check_array_api_cross_namespace_inference": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
+            "the wrapped StandardScaler does not yet move its fitted attributes to "
+            "the namespace and device of X"
         ),
         "check_array_api_cross_namespace_inference_mixed_dtypes": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
+            "the wrapped StandardScaler does not yet move its fitted attributes to "
+            "the namespace and device of X"
         ),
         # Fails because StandardScaler, which gets wrapped by FeatureUnion, supports
         # array API but FeatureUnion itself does not
@@ -1482,6 +1485,23 @@ def _get_expected_failed_checks(estimator):
                     "check_dataframe_column_names_consistency": "FIXME",
                 }
             )
+    if (
+        type(estimator) in (GridSearchCV, RandomizedSearchCV)
+        and tags.array_api_support
+        and type(estimator.estimator).__name__ not in _NUMPY_FITTED_ATTRS
+    ):
+        # TODO(#34604): remove once every wrapped estimator stores its fitted
+        # attributes as NumPy. The search converts its own fitted attributes but
+        # `best_estimator_` converts itself, or not.
+        reason = (
+            f"the wrapped {type(estimator.estimator).__name__} does not yet store "
+            "its fitted attributes as NumPy"
+        )
+        failed_checks = {
+            **failed_checks,
+            "check_array_api_input": reason,
+            "check_array_api_mixed_inputs": reason,
+        }
     if type(estimator) == LinearRegression:
         # TODO: remove when scipy min version >= 1.16
         # Regression introduced in scipy 1.15 and fixed in 1.16, see

@@ -15,7 +15,14 @@ import pytest
 from scipy.stats import bernoulli, expon, randint, uniform
 
 from sklearn import config_context
-from sklearn.base import BaseEstimator, ClassifierMixin, clone, is_classifier
+from sklearn.base import (
+    BaseEstimator,
+    ClassifierMixin,
+    RegressorMixin,
+    TransformerMixin,
+    clone,
+    is_classifier,
+)
 from sklearn.callback._testing.callbacks import (
     RecordingAutoPropagatedCallback,
     RecordingCallback,
@@ -94,6 +101,10 @@ from sklearn.tests.metadata_routing_common import (
 )
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 from sklearn.utils._array_api import (
+    _atol_for_type,
+    get_namespace,
+    get_namespace_and_device,
+    move_to,
     yield_namespace_device_dtype_combinations,
 )
 from sklearn.utils._mocking import CheckingClassifier
@@ -112,7 +123,10 @@ from sklearn.utils._testing import (
     skip_callback_test_if_wasm,
     skip_if_use_threading_backend_with_high_parallelism,
 )
-from sklearn.utils.estimator_checks import _enforce_estimator_tags_y
+from sklearn.utils.estimator_checks import (
+    _enforce_estimator_tags_y,
+    _non_numpy_array_paths,
+)
 from sklearn.utils.fixes import CSR_CONTAINERS
 from sklearn.utils.metadata_routing import get_routing_for_object
 from sklearn.utils.validation import _num_samples
@@ -2931,6 +2945,242 @@ def test_array_api_search_cv_classifier(
         )
         searcher.fit(X_xp, y_xp)
         searcher.score(X_xp, y_xp)
+
+
+class _NumpyOnlyRegressor(RegressorMixin, BaseEstimator):
+    """Regressor without array API support, like a third-party regressor."""
+
+    def __init__(self, alpha=1.0):
+        self.alpha = alpha
+
+    def fit(self, X, y):
+        X, y = np.asarray(X), np.asarray(y)
+        self.coef_ = np.linalg.lstsq(X, y, rcond=None)[0] * self.alpha
+        return self
+
+    def predict(self, X):
+        return np.asarray(X) @ self.coef_
+
+
+class _NumpyOnlyTransformer(TransformerMixin, BaseEstimator):
+    """Transformer without array API support, like a third-party transformer."""
+
+    def fit(self, X, y=None):
+        self.mean_ = np.asarray(X).mean(axis=0)
+        return self
+
+    def transform(self, X):
+        return np.asarray(X) - self.mean_
+
+
+def _xfail_if_numpy_asarray_fails(X):
+    try:
+        np.asarray(X)
+    except (TypeError, RuntimeError, ValueError):
+        pytest.xfail(
+            "An estimator without array API support calls np.asarray, which "
+            "cannot convert arrays on this device."
+        )
+
+
+def _make_search(SearchCV, estimator, param_grid):
+    if SearchCV is GridSearchCV:
+        return GridSearchCV(estimator, param_grid, cv=2, error_score="raise")
+    return RandomizedSearchCV(
+        estimator, param_grid, n_iter=2, cv=2, error_score="raise", random_state=0
+    )
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+@pytest.mark.parametrize("SearchCV", [GridSearchCV, RandomizedSearchCV])
+def test_search_cv_estimator_without_array_api_support(
+    SearchCV, array_namespace, device_name, dtype_name
+):
+    """A search over an estimator without array API support, with dispatch on.
+
+    The search delegates inference to `best_estimator_` and returns what it
+    returns, NumPy arrays here. Its own fitted attributes are NumPy.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    rng = np.random.RandomState(0)
+    X_np = rng.uniform(size=(30, 3)).astype(dtype_name)
+    y_np = (X_np @ np.arange(1.0, 4.0)).astype(dtype_name)
+    X_xp = xp.asarray(X_np, device=device)
+    y_xp = xp.asarray(y_np, device=device)
+    atol = _atol_for_type(dtype_name)
+
+    def make_search():
+        return _make_search(SearchCV, _NumpyOnlyRegressor(), {"alpha": [0.5, 1.0]})
+
+    with config_context(array_api_dispatch=False):
+        search = make_search().fit(X_np, y_np)
+        expected = search.predict(X_np)
+        expected_score = search.score(X_np, y_np)
+
+    with config_context(array_api_dispatch=True):
+        search_np = make_search().fit(X_np, y_np)
+        assert_allclose(search_np.predict(X_np), expected, atol=atol)
+
+        _xfail_if_numpy_asarray_fails(X_xp)
+
+        search_xp = make_search().fit(X_xp, y_xp)
+        assert not _non_numpy_array_paths(search_xp)
+        assert isinstance(search_xp.best_score_, float)
+        assert search_xp.best_params_ == search.best_params_
+        for search_ in (search_np, search_xp):
+            for X in (X_np, X_xp):
+                result = search_.predict(X)
+                assert isinstance(result, np.ndarray)
+                assert_allclose(result, expected, atol=atol)
+            score = search_.score(X_xp, y_xp)
+            assert score == pytest.approx(expected_score, abs=atol)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+def test_search_cv_pipeline_with_step_without_array_api_support(
+    array_namespace, device_name, dtype_name
+):
+    """A step without array API support in front of LogisticRegression.
+
+    The step returns NumPy, so LogisticRegression, and the search, predict
+    NumPy arrays whatever the namespace of `X`.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X_np, y_np = make_classification(n_samples=40, n_features=5, random_state=0)
+    X_np = X_np.astype(dtype_name)
+    X_xp = xp.asarray(X_np, device=device)
+    y_xp = xp.asarray(y_np, device=device)
+
+    def make_search():
+        return GridSearchCV(
+            make_pipeline(_NumpyOnlyTransformer(), LogisticRegression()),
+            {"logisticregression__C": [0.5, 1.0]},
+            cv=2,
+            error_score="raise",
+        )
+
+    with config_context(array_api_dispatch=False):
+        expected = make_search().fit(X_np, y_np).predict_proba(X_np)
+
+    with config_context(array_api_dispatch=True):
+        _xfail_if_numpy_asarray_fails(X_xp)
+        search = make_search().fit(X_xp, y_xp)
+        for X in (X_np, X_xp):
+            result = search.predict_proba(X)
+            assert isinstance(result, np.ndarray)
+            assert_allclose(result, expected, atol=_atol_for_type(dtype_name))
+        assert isinstance(search.score(X_xp, y_xp), float)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+@pytest.mark.parametrize("SearchCV", [GridSearchCV, RandomizedSearchCV])
+def test_search_cv_score_cross_namespace(
+    SearchCV, array_namespace, device_name, dtype_name
+):
+    """`score` accepts `X` from another namespace, device and float dtype.
+
+    The common checks do not call `score`. Covers fitting on `xp` and scoring
+    NumPy, and fitting float64 NumPy and scoring `xp`.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X_np, y_np = make_classification(n_samples=40, n_features=5, random_state=0)
+    X_xp = xp.asarray(X_np.astype(dtype_name), device=device)
+    y_xp = xp.asarray(y_np, device=device)
+
+    def make_search():
+        return _make_search(SearchCV, LogisticRegression(), {"C": [0.5, 1.0]})
+
+    with config_context(array_api_dispatch=False):
+        search_np = make_search().fit(X_np, y_np)
+        expected = search_np.score(X_np, y_np)
+
+    with config_context(array_api_dispatch=True):
+        search_xp = make_search().fit(X_xp, y_xp)
+        assert not _non_numpy_array_paths(search_xp)
+        # Holding only NumPy arrays, the search unpickles without `xp`.
+        search_xp = pickle.loads(pickle.dumps(search_xp))
+        for search, X, y in [(search_xp, X_np, y_np), (search_np, X_xp, y_xp)]:
+            score = search.score(X, y)
+            assert isinstance(score, float)
+            # `accuracy_score` averages integer labels in float32 with PyTorch.
+            assert score == pytest.approx(expected, abs=1e-6)
+
+
+# TODO(#34604): remove the xfail once StandardScaler stores its fitted attributes
+# as NumPy.
+@pytest.mark.xfail(
+    reason="StandardScaler does not move its fitted attributes to the namespace "
+    "and device of X yet",
+    strict=True,
+)
+@pytest.mark.parametrize("fit_on", ["numpy", "xp"])
+def test_search_cv_old_convention_estimator_cross_namespace(fit_on):
+    xp = pytest.importorskip("array_api_strict")
+    X_np, y_np = make_classification(n_samples=40, n_features=5, random_state=0)
+    X_xp, y_xp = xp.asarray(X_np), xp.asarray(y_np)
+    X_fit, y_fit, X_predict = (
+        (X_np, y_np, X_xp) if fit_on == "numpy" else (X_xp, y_xp, X_np)
+    )
+
+    with config_context(array_api_dispatch=True):
+        search = GridSearchCV(
+            make_pipeline(StandardScaler(), LogisticRegression()),
+            {"logisticregression__C": [0.5, 1.0]},
+            cv=2,
+        ).fit(X_fit, y_fit)
+        search.predict(X_predict)
+
+
+class _ArrayParamRegressor(RegressorMixin, BaseEstimator):
+    """Array API regressor with an array-valued constructor parameter."""
+
+    def __init__(self, offset=None):
+        self.offset = offset
+
+    def fit(self, X, y):
+        return self
+
+    def predict(self, X):
+        xp, _, device = get_namespace_and_device(X)
+        offset = move_to(self.offset, xp=xp, device=device)
+        return xp.zeros(X.shape[0], device=device) + offset[0]
+
+    def __sklearn_tags__(self):
+        tags = super().__sklearn_tags__()
+        tags.array_api_support = True
+        return tags
+
+
+# TODO(#34604): decide whether parameter values stored in fitted attributes are
+# converted to NumPy.
+@pytest.mark.xfail(
+    reason="_fitted_attrs_as_numpy converts the candidate parameters stored in "
+    "best_params_ and cv_results_['params'], but not best_estimator_'s",
+    strict=True,
+)
+def test_search_cv_array_valued_params_are_not_converted():
+    xp = pytest.importorskip("array_api_strict")
+    X, y = make_classification(n_samples=20, n_features=3, random_state=0)
+    X_xp, y_xp = xp.asarray(X), xp.asarray(y * 1.0)
+    offsets = [xp.asarray([0.0]), xp.asarray([1.0])]
+
+    with config_context(array_api_dispatch=True):
+        search = GridSearchCV(_ArrayParamRegressor(), {"offset": offsets}, cv=2)
+        search.fit(X_xp, y_xp)
+
+    best_offset = search.best_estimator_.offset
+    assert get_namespace(best_offset)[0] is get_namespace(X_xp)[0]
+    assert search.best_params_["offset"] is best_offset
+    assert search.cv_results_["params"][search.best_index_]["offset"] is best_offset
 
 
 # Construct these outside the tests so that the same object is used
