@@ -22,12 +22,13 @@ from sklearn.utils import _array_api, check_array, metadata_routing, resample
 from sklearn.utils._array_api import (
     _find_matching_floating_dtype,
     _fitted_attrs_like,
+    _is_numpy_namespace,
     _max_precision_float_dtype,
     _modify_in_place_if_numpy,
+    _move_state,
     array_device,
     get_namespace,
     get_namespace_and_device,
-    move_to,
     size,
     supported_float_dtypes,
     xpx,
@@ -518,9 +519,15 @@ class MinMaxScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
         if first_pass:
             self.n_samples_seen_ = X.shape[0]
         else:
-            # The state of previous calls is stored as NumPy arrays.
-            prev_min, prev_max = move_to(
-                self.data_min_, self.data_max_, xp=xp, device=device
+            # The state of previous calls is stored as NumPy arrays. A fresh fit
+            # keeps it in the dtype of `X`; NumPy promotes mixed float dtypes, so
+            # NumPy input keeps the behaviour without array API dispatch.
+            prev_min, prev_max = _move_state(
+                self.data_min_,
+                self.data_max_,
+                xp=xp,
+                device=device,
+                dtype=None if _is_numpy_namespace(xp) else X.dtype,
             )
             data_min = xp.minimum(prev_min, data_min)
             data_max = xp.maximum(prev_max, data_max)
@@ -970,13 +977,11 @@ class StandardScaler(
         if first_call:
             self.n_samples_seen_ = xp.zeros(n_features, dtype=dtype, device=X_device)
         else:
-            # The state of previous calls is stored as NumPy arrays.
-            self.n_samples_seen_, self.mean_, self.var_ = move_to(
-                np.asarray(self.n_samples_seen_),
-                self.mean_,
-                self.var_,
-                xp=xp,
-                device=X_device,
+            # The state of previous calls is stored as NumPy arrays. The running
+            # statistics are kept at the highest precision of the device, so they
+            # keep their dtype.
+            self.n_samples_seen_, self.mean_, self.var_ = _move_state(
+                self.n_samples_seen_, self.mean_, self.var_, xp=xp, device=X_device
             )
             if size(self.n_samples_seen_) == 1:
                 self.n_samples_seen_ = xp.repeat(self.n_samples_seen_, X.shape[1])
