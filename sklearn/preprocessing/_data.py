@@ -22,7 +22,6 @@ from sklearn.utils import _array_api, check_array, metadata_routing, resample
 from sklearn.utils._array_api import (
     _find_matching_floating_dtype,
     _fitted_attrs_like,
-    _is_numpy_namespace,
     _max_precision_float_dtype,
     _modify_in_place_if_numpy,
     _move_state,
@@ -520,14 +519,13 @@ class MinMaxScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
             self.n_samples_seen_ = X.shape[0]
         else:
             # The state of previous calls is stored as NumPy arrays. A fresh fit
-            # keeps it in the dtype of `X`; NumPy promotes mixed float dtypes, so
-            # NumPy input keeps the behaviour without array API dispatch.
+            # keeps it in the dtype of `X`.
             prev_min, prev_max = _move_state(
                 self.data_min_,
                 self.data_max_,
                 xp=xp,
                 device=device,
-                dtype=None if _is_numpy_namespace(xp) else X.dtype,
+                dtype=X.dtype,
             )
             data_min = xp.minimum(prev_min, data_min)
             data_max = xp.maximum(prev_max, data_max)
