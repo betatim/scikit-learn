@@ -22,10 +22,10 @@ from sklearn.utils._array_api import (
     _fitted_attrs_like,
     _is_numpy_namespace,
     _logsumexp,
+    _move_state,
     _take_classes,
     get_namespace,
     get_namespace_and_device,
-    move_to,
     size,
 )
 from sklearn.utils._param_validation import Interval
@@ -479,20 +479,22 @@ class GaussianNB(_BaseNB):
                 msg = "Number of features %d does not match previous data %d."
                 raise ValueError(msg % (X.shape[1], self.theta_.shape[1]))
             # The state stored by a previous call is NumPy, it is updated in place
-            # below with arrays from the namespace and device of `X`. Floating point
-            # state is cast to the dtype of non-NumPy `X` like `_fitted_attrs_like`
-            # does, because namespaces like PyTorch do not mix float dtypes.
-            state = move_to(
-                self.theta_, self.var_, self.class_count_, xp=xp, device=device
+            # below with arrays from the namespace and device of `X`. A fresh fit
+            # keeps it in the floating dtype of `X`; NumPy promotes mixed float
+            # dtypes, so NumPy input keeps the behaviour without array API dispatch.
+            self.theta_, self.var_, self.class_count_ = _move_state(
+                self.theta_,
+                self.var_,
+                self.class_count_,
+                xp=xp,
+                device=device,
+                dtype=None if _is_numpy_namespace(xp) else float_dtype,
             )
-            if not _is_numpy_namespace(xp):
-                state = tuple(xp.astype(a, float_dtype, copy=False) for a in state)
-            self.theta_, self.var_, self.class_count_ = state
             # Put epsilon back in each time
             self.var_[:, :] -= self.epsilon_
 
         # `classes_` is NumPy after a previous call, while `y` may not be.
-        classes = move_to(self.classes_, xp=xp_y, device=device_y)
+        classes = _move_state(self.classes_, xp=xp_y, device=device_y)
 
         unique_y = xp_y.unique_values(y)
         unique_y_in_classes = xpx.isin(unique_y, classes, xp=xp_y)
