@@ -23,6 +23,69 @@ from sklearn.utils._array_api import (
 from sklearn.utils.validation import check_array, check_is_fitted, validate_data
 
 
+def _get_covariance(components, explained_variance, noise_variance, whiten, xp):
+    """Covariance of the generative model, see `_BasePCA.get_covariance`."""
+    if whiten:
+        components = components * xp.sqrt(explained_variance[:, np.newaxis])
+    exp_var_diff = explained_variance - noise_variance
+    exp_var_diff = xp.where(
+        explained_variance > noise_variance,
+        exp_var_diff,
+        xp.asarray(
+            0.0,
+            device=array_device(explained_variance),
+            dtype=explained_variance.dtype,
+        ),
+    )
+    cov = (components.T * exp_var_diff) @ components
+    _add_to_diagonal(cov, noise_variance, xp)
+    return cov
+
+
+def _get_precision(
+    components, explained_variance, noise_variance, whiten, xp, is_array_api_compliant
+):
+    """Precision of the generative model, see `_BasePCA.get_precision`."""
+    n_components, n_features = components.shape
+
+    # handle corner cases first
+    if n_components == 0:
+        return (
+            xp.eye(n_features, dtype=components.dtype, device=array_device(components))
+            / noise_variance
+        )
+
+    if is_array_api_compliant:
+        linalg_inv = xp.linalg.inv
+    else:
+        linalg_inv = linalg.inv
+
+    if noise_variance == 0.0:
+        return linalg_inv(
+            _get_covariance(components, explained_variance, noise_variance, whiten, xp)
+        )
+
+    # Get precision using matrix inversion lemma
+    if whiten:
+        components = components * xp.sqrt(explained_variance[:, np.newaxis])
+    exp_var_diff = explained_variance - noise_variance
+    exp_var_diff = xp.where(
+        explained_variance > noise_variance,
+        exp_var_diff,
+        xp.asarray(
+            0.0,
+            device=array_device(explained_variance),
+            dtype=explained_variance.dtype,
+        ),
+    )
+    precision = components @ components.T / noise_variance
+    _add_to_diagonal(precision, 1.0 / exp_var_diff, xp)
+    precision = components.T @ linalg_inv(precision) @ components
+    precision /= -(noise_variance**2)
+    _add_to_diagonal(precision, 1.0 / noise_variance, xp)
+    return precision
+
+
 class _BasePCA(
     ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEstimator, metaclass=ABCMeta
 ):
@@ -46,26 +109,13 @@ class _BasePCA(
             device as the fitted attributes.
         """
         xp, _ = get_namespace(self.components_)
-        return self._covariance_from(self, xp)
-
-    def _covariance_from(self, fitted, xp):
-        # `fitted` is either the estimator or a view of its fitted attributes in
-        # the namespace of the data passed to an inference method, so that the
-        # computation happens there instead of in the namespace of `fit`.
-        components_ = fitted.components_
-        exp_var = fitted.explained_variance_
-        noise_variance = fitted.noise_variance_
-        if self.whiten:
-            components_ = components_ * xp.sqrt(exp_var[:, np.newaxis])
-        exp_var_diff = exp_var - noise_variance
-        exp_var_diff = xp.where(
-            exp_var > noise_variance,
-            exp_var_diff,
-            xp.asarray(0.0, device=array_device(exp_var), dtype=exp_var.dtype),
+        return _get_covariance(
+            self.components_,
+            self.explained_variance_,
+            self.noise_variance_,
+            self.whiten,
+            xp,
         )
-        cov = (components_.T * exp_var_diff) @ components_
-        _add_to_diagonal(cov, noise_variance, xp)
-        return cov
 
     def get_precision(self):
         """Compute data precision matrix with the generative model.
@@ -80,49 +130,14 @@ class _BasePCA(
             device as the fitted attributes.
         """
         xp, is_array_api_compliant = get_namespace(self.components_)
-        return self._precision_from(self, xp, is_array_api_compliant)
-
-    def _precision_from(self, fitted, xp, is_array_api_compliant):
-        # See `_covariance_from` for what `fitted` is.
-        n_features = self.components_.shape[1]
-        components_ = fitted.components_
-
-        # handle corner cases first
-        if self.n_components_ == 0:
-            return (
-                xp.eye(
-                    n_features,
-                    dtype=components_.dtype,
-                    device=array_device(components_),
-                )
-                / fitted.noise_variance_
-            )
-
-        if is_array_api_compliant:
-            linalg_inv = xp.linalg.inv
-        else:
-            linalg_inv = linalg.inv
-
-        noise_variance = fitted.noise_variance_
-        if noise_variance == 0.0:
-            return linalg_inv(self._covariance_from(fitted, xp))
-
-        # Get precision using matrix inversion lemma
-        exp_var = fitted.explained_variance_
-        if self.whiten:
-            components_ = components_ * xp.sqrt(exp_var[:, np.newaxis])
-        exp_var_diff = exp_var - noise_variance
-        exp_var_diff = xp.where(
-            exp_var > noise_variance,
-            exp_var_diff,
-            xp.asarray(0.0, device=array_device(exp_var), dtype=exp_var.dtype),
+        return _get_precision(
+            self.components_,
+            self.explained_variance_,
+            self.noise_variance_,
+            self.whiten,
+            xp,
+            is_array_api_compliant,
         )
-        precision = components_ @ components_.T / noise_variance
-        _add_to_diagonal(precision, 1.0 / exp_var_diff, xp)
-        precision = components_.T @ linalg_inv(precision) @ components_
-        precision /= -(noise_variance**2)
-        _add_to_diagonal(precision, 1.0 / noise_variance, xp)
-        return precision
 
     @abstractmethod
     def fit(self, X, y=None):
@@ -160,7 +175,7 @@ class _BasePCA(
             Projection of X in the first principal components, where `n_samples`
             is the number of samples and `n_components` is the number of the components.
         """
-        xp, _, device = get_namespace_and_device(X)
+        xp, _ = get_namespace(X)
 
         check_is_fitted(self)
 
@@ -171,13 +186,12 @@ class _BasePCA(
             accept_sparse=("csr", "csc"),
             reset=False,
         )
-        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
-        return self._transform(X, fitted, xp=xp, x_is_centered=False)
+        return self._transform(X, xp=xp, x_is_centered=False)
 
-    def _transform(self, X, fitted, xp, x_is_centered=False):
-        # `fitted` is a view of the fitted attributes in the namespace of `X`, or
-        # the estimator itself in `fit_transform`, where the attributes have not
-        # been converted to NumPy yet.
+    def _transform(self, X, xp, x_is_centered=False):
+        # Outside of `fit` the attributes are NumPy, inside (`fit_transform`) they
+        # already follow `X`.
+        fitted = _fitted_attrs_like(self, X)
         components_ = fitted.components_
         X_transformed = X @ components_.T
         if not x_is_centered:

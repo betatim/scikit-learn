@@ -12,7 +12,7 @@ from scipy.sparse import issparse
 from scipy.sparse.linalg import svds
 
 from sklearn.base import _fit_context
-from sklearn.decomposition._base import _BasePCA
+from sklearn.decomposition._base import _BasePCA, _get_precision
 from sklearn.utils import check_random_state
 from sklearn.utils._arpack import _init_arpack_v0
 from sklearn.utils._array_api import (
@@ -468,7 +468,7 @@ class PCA(_BasePCA):
 
             return U
         else:  # solver="covariance_eigh" does not compute U at fit time.
-            return self._transform(X, self, xp, x_is_centered=x_is_centered)
+            return self._transform(X, xp, x_is_centered=x_is_centered)
 
     def _fit(self, X):
         """Dispatch to the right submethod depending on the chosen solver."""
@@ -784,7 +784,14 @@ class PCA(_BasePCA):
         fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
         Xr = X - fitted.mean_
         n_features = X.shape[1]
-        precision = self._precision_from(fitted, xp, is_array_api_compliant)
+        precision = _get_precision(
+            fitted.components_,
+            fitted.explained_variance_,
+            fitted.noise_variance_,
+            self.whiten,
+            xp,
+            is_array_api_compliant,
+        )
         log_like = -0.5 * xp.sum(Xr * (Xr @ precision), axis=1)
         log_like -= 0.5 * (n_features * log(2.0 * np.pi) - fast_logdet(precision))
         return log_like
