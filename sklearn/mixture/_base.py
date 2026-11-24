@@ -261,7 +261,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
                     self.lower_bound_,
                     xp=xp,
                     device=device,
-                    dtype=None if _is_numpy_namespace(xp) else X.dtype,
+                    dtype=X.dtype,
                 )
                 self._set_parameters(params, xp=xp)
             current_lower_bounds = []
