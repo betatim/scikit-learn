@@ -130,6 +130,18 @@ def empirical_covariance(X, *, assume_centered=False):
     return covariance
 
 
+def _precision(covariance, precision, xp):
+    """Return `precision`, or the pseudo-inverse of `covariance` if it is None.
+
+    `precision` is None when the estimator was fitted with `store_precision=False`.
+    """
+    if precision is not None:
+        return precision
+    if _is_numpy_namespace(xp):
+        return linalg.pinvh(covariance, check_finite=False)
+    return xp.linalg.pinv(covariance)
+
+
 class EmpiricalCovariance(BaseEstimator):
     """Maximum likelihood covariance estimator.
 
@@ -245,18 +257,7 @@ class EmpiricalCovariance(BaseEstimator):
             It uses the same array library and device as the fitted attributes.
         """
         xp, _ = get_namespace(self.covariance_)
-        return self._precision_from(self, xp)
-
-    def _precision_from(self, fitted, xp):
-        # `fitted` is either the estimator or a view of its fitted attributes in
-        # the namespace of the data passed to an inference method, so that the
-        # pseudo-inverse is computed there instead of in the namespace of `fit`.
-        if self.store_precision:
-            return fitted.precision_
-        covariance = fitted.covariance_
-        if _is_numpy_namespace(xp):
-            return linalg.pinvh(covariance, check_finite=False)
-        return xp.linalg.pinv(covariance)
+        return _precision(self.covariance_, self.precision_, xp)
 
     @_fit_context(prefer_skip_nested_validation=True)
     def fit(self, X, y=None):
@@ -318,7 +319,9 @@ class EmpiricalCovariance(BaseEstimator):
         # compute empirical covariance of the test set
         test_cov = empirical_covariance(X_test - fitted.location_, assume_centered=True)
         # compute log likelihood
-        res = log_likelihood(test_cov, self._precision_from(fitted, xp))
+        res = log_likelihood(
+            test_cov, _precision(fitted.covariance_, fitted.precision_, xp)
+        )
 
         return res
 
@@ -405,7 +408,7 @@ class EmpiricalCovariance(BaseEstimator):
 
         fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
         location = fitted.location_
-        precision = self._precision_from(fitted, xp)
+        precision = _precision(fitted.covariance_, fitted.precision_, xp)
         if _is_numpy_namespace(xp):
             with config_context(assume_finite=True):
                 # compute mahalanobis distances
