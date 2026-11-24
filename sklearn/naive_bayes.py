@@ -20,7 +20,6 @@ from sklearn.utils._array_api import (
     _average,
     _find_matching_floating_dtype,
     _fitted_attrs_like,
-    _is_numpy_namespace,
     _logsumexp,
     _move_state,
     _take_classes,
@@ -480,15 +479,14 @@ class GaussianNB(_BaseNB):
                 raise ValueError(msg % (X.shape[1], self.theta_.shape[1]))
             # The state stored by a previous call is NumPy, it is updated in place
             # below with arrays from the namespace and device of `X`. A fresh fit
-            # keeps it in the floating dtype of `X`; NumPy promotes mixed float
-            # dtypes, so NumPy input keeps the behaviour without array API dispatch.
+            # keeps it in the floating dtype of `X`.
             self.theta_, self.var_, self.class_count_ = _move_state(
                 self.theta_,
                 self.var_,
                 self.class_count_,
                 xp=xp,
                 device=device,
-                dtype=None if _is_numpy_namespace(xp) else float_dtype,
+                dtype=float_dtype,
             )
             # Put epsilon back in each time
             self.var_[:, :] -= self.epsilon_
