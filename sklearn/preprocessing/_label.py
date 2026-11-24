@@ -14,7 +14,6 @@ from sklearn.base import BaseEstimator, TransformerMixin, _fit_context
 from sklearn.utils import _align_api_if_sparse, column_or_1d
 from sklearn.utils._array_api import (
     _find_matching_floating_dtype,
-    _fitted_attrs_like,
     _is_numpy_namespace,
     _take_classes,
     get_namespace,
@@ -139,8 +138,9 @@ class LabelEncoder(TransformerMixin, BaseEstimator, auto_wrap_output_keys=None):
         check_is_fitted(self)
         xp, _, device = get_namespace_and_device(y)
         # `y` is cast to the dtype of `classes_`, so `classes_` has to be in the
-        # namespace of `y` before `y` is validated.
-        classes = _fitted_attrs_like(self, y, xp=xp, device=device).classes_
+        # namespace of `y` before `y` is validated. Labels are compared by value, so
+        # `classes_` keeps its dtype, unless the device does not support float64.
+        classes = move_to(self.classes_, xp=xp, device=device)
         y = column_or_1d(y, dtype=classes.dtype, warn=True)
         # transform of empty array is empty array
         if _num_samples(y) == 0:

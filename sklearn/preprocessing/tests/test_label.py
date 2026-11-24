@@ -18,6 +18,7 @@ from sklearn.utils._array_api import (
     _atol_for_type,
     _convert_to_numpy,
     _is_numpy_namespace,
+    _max_precision_float_dtype,
     array_device,
     get_namespace,
     indexing_dtype,
@@ -969,6 +970,35 @@ def test_label_encoder_array_api_cross_namespace(
         assert get_namespace(inverse)[0] is y_infer_ns
         assert array_device(inverse) == array_device(y_infer)
         assert_array_equal(_convert_to_numpy(inverse, xp=y_infer_ns), y)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+def test_label_encoder_array_api_compares_in_classes_dtype(
+    array_namespace, device_name, dtype_name
+):
+    """Labels are compared in the dtype of `classes_`, in every namespace.
+
+    float32 labels are cast to the float64 `classes_` before comparing, so labels
+    that are not exactly representable in float32 are not found, as for NumPy
+    without array API dispatch. On devices without float64, `classes_` itself is
+    moved as float32 and the labels match.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, "float32")
+    y = np.array([0.1, 0.2, 0.3])
+    with config_context(array_api_dispatch=True):
+        le = LabelEncoder().fit(y)
+        y_float32 = xp.asarray(y.astype(np.float32), device=device)
+
+        if _max_precision_float_dtype(xp, device) == xp.float32:
+            assert_array_equal(
+                _convert_to_numpy(le.transform(y_float32), xp=xp), [0, 1, 2]
+            )
+        else:
+            with pytest.raises(ValueError, match="previously unseen labels"):
+                le.transform(y_float32)
 
 
 @pytest.mark.parametrize(
