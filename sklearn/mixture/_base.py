@@ -17,34 +17,14 @@ from sklearn.cluster import kmeans_plusplus
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.utils import check_random_state
 from sklearn.utils._array_api import (
-    _convert_arrays,
     _is_numpy_namespace,
     _logsumexp,
+    _move_state,
     get_namespace,
     get_namespace_and_device,
-    move_to,
 )
 from sklearn.utils._param_validation import Interval, StrOptions
 from sklearn.utils.validation import check_is_fitted, validate_data
-
-
-def _like_X(value, X):
-    """Move the arrays in `value` to the namespace and device of `X`.
-
-    Parameters are stored as NumPy arrays. Floating point arrays are also cast to
-    the dtype of non-NumPy `X`, like `_fitted_attrs_like` does, because namespaces
-    other than NumPy do not promote mixed float dtypes.
-    """
-    xp, _, device = get_namespace_and_device(X)
-    cast = not _is_numpy_namespace(xp)
-
-    def convert(array):
-        array = move_to(array, xp=xp, device=device)
-        if cast and xp.isdtype(array.dtype, "real floating"):
-            array = xp.astype(array, X.dtype)
-        return array
-
-    return _convert_arrays(value, convert, recurse_estimators=False)
 
 
 def _check_shape(param, param_shape, name):
@@ -276,8 +256,14 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
             else:
                 # The previous fit stored the parameters as NumPy arrays,
                 # continue from them in the namespace, device and dtype of X.
-                self._set_parameters(_like_X(self._get_parameters(), X), xp=xp)
-                lower_bound = _like_X(self.lower_bound_, X)
+                params, lower_bound = _move_state(
+                    self._get_parameters(),
+                    self.lower_bound_,
+                    xp=xp,
+                    device=device,
+                    dtype=None if _is_numpy_namespace(xp) else X.dtype,
+                )
+                self._set_parameters(params, xp=xp)
             current_lower_bounds = []
 
             if self.max_iter == 0:

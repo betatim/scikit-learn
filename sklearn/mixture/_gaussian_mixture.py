@@ -8,13 +8,15 @@ import numpy as np
 
 from sklearn._config import get_config
 from sklearn.externals import array_api_extra as xpx
-from sklearn.mixture._base import BaseMixture, _check_shape, _like_X
+from sklearn.mixture._base import BaseMixture, _check_shape
 from sklearn.utils import check_array
 from sklearn.utils._array_api import (
     _add_to_diagonal,
     _cholesky,
     _fitted_attrs_like,
+    _is_numpy_namespace,
     _linalg_solve,
+    _move_state,
     get_namespace,
     get_namespace_and_device,
 )
@@ -868,19 +870,29 @@ class GaussianMixture(BaseMixture):
             if self.weights_init is None:
                 weights /= n_samples
 
-        self.weights_ = (
-            weights if self.weights_init is None else _like_X(self.weights_init, X)
+        # The initial parameters can be in another namespace than `X`, for example
+        # the NumPy fitted attributes of another model. A fresh fit computes in the
+        # dtype of `X`; NumPy promotes mixed float dtypes, so NumPy input keeps the
+        # behaviour without array API dispatch.
+        weights_init, means_init, precisions_init = _move_state(
+            self.weights_init,
+            self.means_init,
+            self.precisions_init,
+            xp=xp,
+            device=device,
+            dtype=None if _is_numpy_namespace(xp) else X.dtype,
         )
-        self.means_ = means if self.means_init is None else _like_X(self.means_init, X)
+        self.weights_ = weights if weights_init is None else weights_init
+        self.means_ = means if means_init is None else means_init
 
-        if self.precisions_init is None:
+        if precisions_init is None:
             self.covariances_ = covariances
             self.precisions_cholesky_ = _compute_precision_cholesky(
                 covariances, self.covariance_type, xp=xp
             )
         else:
             self.precisions_cholesky_ = _compute_precision_cholesky_from_precisions(
-                _like_X(self.precisions_init, X), self.covariance_type, xp=xp
+                precisions_init, self.covariance_type, xp=xp
             )
 
     def _m_step(self, X, log_resp, xp=None):
