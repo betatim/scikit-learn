@@ -730,14 +730,13 @@ class BayesianGaussianMixture(BaseMixture):
         self._estimate_means(nk, xk)
         self._estimate_precisions(nk, xk, sk)
 
-    def _estimate_log_weights(self, xp=None, fitted=None):
-        fitted = self if fitted is None else fitted
+    def _estimate_log_weights(self, X, xp=None):
         if self.weight_concentration_prior_type == "dirichlet_process":
             digamma_sum = digamma(
-                fitted.weight_concentration_[0] + fitted.weight_concentration_[1]
+                self.weight_concentration_[0] + self.weight_concentration_[1]
             )
-            digamma_a = digamma(fitted.weight_concentration_[0])
-            digamma_b = digamma(fitted.weight_concentration_[1])
+            digamma_a = digamma(self.weight_concentration_[0])
+            digamma_b = digamma(self.weight_concentration_[1])
             return (
                 digamma_a
                 - digamma_sum
@@ -745,28 +744,27 @@ class BayesianGaussianMixture(BaseMixture):
             )
         else:
             # case Variational Gaussian mixture with dirichlet distribution
-            return digamma(fitted.weight_concentration_) - digamma(
-                np.sum(fitted.weight_concentration_)
+            return digamma(self.weight_concentration_) - digamma(
+                np.sum(self.weight_concentration_)
             )
 
-    def _estimate_log_prob(self, X, xp=None, fitted=None):
-        fitted = self if fitted is None else fitted
+    def _estimate_log_prob(self, X, xp=None):
         _, n_features = X.shape
         # We remove `n_features * np.log(self.degrees_of_freedom_)` because
         # the precision matrix is normalized
         log_gauss = _estimate_log_gaussian_prob(
-            X, fitted.means_, fitted.precisions_cholesky_, self.covariance_type
-        ) - 0.5 * n_features * np.log(fitted.degrees_of_freedom_)
+            X, self.means_, self.precisions_cholesky_, self.covariance_type
+        ) - 0.5 * n_features * np.log(self.degrees_of_freedom_)
 
         log_lambda = n_features * np.log(2.0) + np.sum(
             digamma(
                 0.5
-                * (fitted.degrees_of_freedom_ - np.arange(0, n_features)[:, np.newaxis])
+                * (self.degrees_of_freedom_ - np.arange(0, n_features)[:, np.newaxis])
             ),
             0,
         )
 
-        return log_gauss + 0.5 * (log_lambda - n_features / fitted.mean_precision_)
+        return log_gauss + 0.5 * (log_lambda - n_features / self.mean_precision_)
 
     def _compute_lower_bound(self, log_resp, log_prob_norm):
         """Estimate the lower bound of the model.
@@ -825,15 +823,14 @@ class BayesianGaussianMixture(BaseMixture):
             - 0.5 * n_features * np.sum(np.log(self.mean_precision_))
         )
 
-    def _get_parameters(self, fitted=None):
-        fitted = self if fitted is None else fitted
+    def _get_parameters(self):
         return (
-            fitted.weight_concentration_,
-            fitted.mean_precision_,
-            fitted.means_,
-            fitted.degrees_of_freedom_,
-            fitted.covariances_,
-            fitted.precisions_cholesky_,
+            self.weight_concentration_,
+            self.mean_precision_,
+            self.means_,
+            self.degrees_of_freedom_,
+            self.covariances_,
+            self.precisions_cholesky_,
         )
 
     def _set_parameters(self, params, xp=None):

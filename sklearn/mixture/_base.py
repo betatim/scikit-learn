@@ -17,14 +17,34 @@ from sklearn.cluster import kmeans_plusplus
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.utils import check_random_state
 from sklearn.utils._array_api import (
-    _fitted_attrs_like,
+    _convert_arrays,
     _is_numpy_namespace,
     _logsumexp,
     get_namespace,
     get_namespace_and_device,
+    move_to,
 )
 from sklearn.utils._param_validation import Interval, StrOptions
 from sklearn.utils.validation import check_is_fitted, validate_data
+
+
+def _like_X(value, X):
+    """Move the arrays in `value` to the namespace and device of `X`.
+
+    Parameters are stored as NumPy arrays. Floating point arrays are also cast to
+    the dtype of non-NumPy `X`, like `_fitted_attrs_like` does, because namespaces
+    other than NumPy do not promote mixed float dtypes.
+    """
+    xp, _, device = get_namespace_and_device(X)
+    cast = not _is_numpy_namespace(xp)
+
+    def convert(array):
+        array = move_to(array, xp=xp, device=device)
+        if cast and xp.isdtype(array.dtype, "real floating"):
+            array = xp.astype(array, X.dtype)
+        return array
+
+    return _convert_arrays(value, convert, recurse_estimators=False)
 
 
 def _check_shape(param, param_shape, name):
@@ -256,9 +276,8 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
             else:
                 # The previous fit stored the parameters as NumPy arrays,
                 # continue from them in the namespace, device and dtype of X.
-                fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
-                self._set_parameters(self._get_parameters(fitted), xp=xp)
-                lower_bound = fitted.lower_bound_
+                self._set_parameters(_like_X(self._get_parameters(), X), xp=xp)
+                lower_bound = _like_X(self.lower_bound_, X)
             current_lower_bounds = []
 
             if self.max_iter == 0:
@@ -350,8 +369,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def _get_parameters(self, fitted=None):
-        """Return the parameters, read from `fitted` or the estimator if None."""
+    def _get_parameters(self):
         pass
 
     @abstractmethod
@@ -374,11 +392,8 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         """
         check_is_fitted(self)
         X = validate_data(self, X, reset=False)
-        xp, _, device = get_namespace_and_device(X)
-        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
-        return _logsumexp(
-            self._estimate_weighted_log_prob(X, xp=xp, fitted=fitted), axis=1, xp=xp
-        )
+
+        return _logsumexp(self._estimate_weighted_log_prob(X), axis=1)
 
     def score(self, X, y=None):
         """Compute the per-sample average log-likelihood of the given data X.
@@ -415,12 +430,9 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
             Component labels.
         """
         check_is_fitted(self)
+        xp, _ = get_namespace(X)
         X = validate_data(self, X, reset=False)
-        xp, _, device = get_namespace_and_device(X)
-        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
-        return xp.argmax(
-            self._estimate_weighted_log_prob(X, xp=xp, fitted=fitted), axis=1
-        )
+        return xp.argmax(self._estimate_weighted_log_prob(X), axis=1)
 
     def predict_proba(self, X):
         """Evaluate the components' density for each sample.
@@ -438,9 +450,8 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         """
         check_is_fitted(self)
         X = validate_data(self, X, reset=False)
-        xp, _, device = get_namespace_and_device(X)
-        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
-        _, log_resp = self._estimate_log_prob_resp(X, xp=xp, fitted=fitted)
+        xp, _ = get_namespace(X)
+        _, log_resp = self._estimate_log_prob_resp(X, xp=xp)
         return xp.exp(log_resp)
 
     def sample(self, n_samples=1):
@@ -511,35 +522,26 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
 
         return np.asarray(X, dtype=np.float64), y
 
-    def _estimate_weighted_log_prob(self, X, xp=None, fitted=None):
+    def _estimate_weighted_log_prob(self, X, xp=None):
         """Estimate the weighted log-probabilities, log P(X | Z) + log weights.
 
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
 
-        fitted : estimator or _FittedAttrsLike, default=None
-            Where to read the fitted attributes from. Inference methods pass a
-            view of the attributes in the namespace of `X`, while fit, where
-            they are already there, uses the estimator itself (None).
 
         Returns
         -------
         weighted_log_prob : array, shape (n_samples, n_component)
         """
-        return self._estimate_log_prob(
-            X, xp=xp, fitted=fitted
-        ) + self._estimate_log_weights(xp=xp, fitted=fitted)
+        return self._estimate_log_prob(X, xp=xp) + self._estimate_log_weights(X, xp=xp)
 
     @abstractmethod
-    def _estimate_log_weights(self, xp=None, fitted=None):
+    def _estimate_log_weights(self, X, xp=None):
         """Estimate log-weights in EM algorithm, E[ log pi ] in VB algorithm.
 
         Parameters
         ----------
-        fitted : estimator or _FittedAttrsLike, default=None
-            Where to read the fitted attributes from, the estimator itself when
-            None.
 
         Returns
         -------
@@ -548,7 +550,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def _estimate_log_prob(self, X, xp=None, fitted=None):
+    def _estimate_log_prob(self, X, xp=None):
         """Estimate the log-probabilities log P(X | Z).
 
         Compute the log-probabilities per each component for each sample.
@@ -557,9 +559,6 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         ----------
         X : array-like of shape (n_samples, n_features)
 
-        fitted : estimator or _FittedAttrsLike, default=None
-            Where to read the fitted attributes from, the estimator itself when
-            None.
 
         Returns
         -------
@@ -567,7 +566,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         """
         pass
 
-    def _estimate_log_prob_resp(self, X, xp=None, fitted=None):
+    def _estimate_log_prob_resp(self, X, xp=None):
         """Estimate log probabilities and responsibilities for each sample.
 
         Compute the log probabilities, weighted log probabilities per
@@ -578,9 +577,6 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         ----------
         X : array-like of shape (n_samples, n_features)
 
-        fitted : estimator or _FittedAttrsLike, default=None
-            Where to read the fitted attributes from, the estimator itself when
-            None.
 
         Returns
         -------
@@ -591,7 +587,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
             logarithm of the responsibilities
         """
         xp, _ = get_namespace(X, xp=xp)
-        weighted_log_prob = self._estimate_weighted_log_prob(X, xp=xp, fitted=fitted)
+        weighted_log_prob = self._estimate_weighted_log_prob(X, xp=xp)
         log_prob_norm = _logsumexp(weighted_log_prob, axis=1, xp=xp)
 
         # There is no errstate equivalent for warning/error management in array API

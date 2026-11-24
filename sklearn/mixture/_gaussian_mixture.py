@@ -8,16 +8,15 @@ import numpy as np
 
 from sklearn._config import get_config
 from sklearn.externals import array_api_extra as xpx
-from sklearn.mixture._base import BaseMixture, _check_shape
+from sklearn.mixture._base import BaseMixture, _check_shape, _like_X
 from sklearn.utils import check_array
 from sklearn.utils._array_api import (
     _add_to_diagonal,
     _cholesky,
-    _is_numpy_namespace,
+    _fitted_attrs_like,
     _linalg_solve,
     get_namespace,
     get_namespace_and_device,
-    move_to,
 )
 from sklearn.utils._param_validation import StrOptions
 from sklearn.utils.extmath import row_norms
@@ -162,17 +161,6 @@ def _check_precisions(precisions, covariance_type, n_components, n_features, xp=
     }
     _check_precisions[covariance_type](precisions, covariance_type, xp=xp)
     return precisions
-
-
-def _like_X(array, X):
-    """Move an initial parameter to the namespace, device and dtype of X."""
-    xp, _, device = get_namespace_and_device(X)
-    array = move_to(array, xp=xp, device=device)
-    # Like `_fitted_attrs_like`: namespaces other than NumPy do not promote
-    # mixed float dtypes.
-    if not _is_numpy_namespace(xp):
-        array = xp.astype(array, X.dtype)
-    return array
 
 
 ###############################################################################
@@ -915,28 +903,27 @@ class GaussianMixture(BaseMixture):
             self.covariances_, self.covariance_type, xp=xp
         )
 
-    def _estimate_log_prob(self, X, xp=None, fitted=None):
-        fitted = self if fitted is None else fitted
+    def _estimate_log_prob(self, X, xp=None):
+        # Outside of `fit` the attributes are NumPy, inside they already follow `X`.
+        fitted = _fitted_attrs_like(self, X)
         return _estimate_log_gaussian_prob(
             X, fitted.means_, fitted.precisions_cholesky_, self.covariance_type, xp=xp
         )
 
-    def _estimate_log_weights(self, xp=None, fitted=None):
-        fitted = self if fitted is None else fitted
-        weights = fitted.weights_
+    def _estimate_log_weights(self, X, xp=None):
+        weights = _fitted_attrs_like(self, X).weights_
         xp, _ = get_namespace(weights, xp=xp)
         return xp.log(weights)
 
     def _compute_lower_bound(self, _, log_prob_norm):
         return log_prob_norm
 
-    def _get_parameters(self, fitted=None):
-        fitted = self if fitted is None else fitted
+    def _get_parameters(self):
         return (
-            fitted.weights_,
-            fitted.means_,
-            fitted.covariances_,
-            fitted.precisions_cholesky_,
+            self.weights_,
+            self.means_,
+            self.covariances_,
+            self.precisions_cholesky_,
         )
 
     def _set_parameters(self, params, xp=None):
