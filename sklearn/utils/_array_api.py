@@ -403,7 +403,7 @@ def get_namespace(
     always returned irrespective of the fact that arrays implement the
     `__array_namespace__` protocol or not.
 
-    Note that if no arrays pass the set filters, ``_NUMPY_API_WRAPPER_INSTANCE, False``
+    Note that if no arrays pass the set filters, ``array_api_compat.numpy, False``
     is returned.
 
     Parameters
@@ -1184,6 +1184,67 @@ def move_estimator_to(estimator, xp, device):
     )
 
 
+def _move_state(*values, xp, device, dtype=None):
+    """Move arrays to the namespace and device where a computation happens.
+
+    Use this for arrays that a fit method computes with and writes back to the
+    estimator: fitted state read back by `partial_fit` or with `warm_start=True`,
+    array-valued constructor parameters used as initial values, `classes_`
+    combined with `y`. Read fitted attributes for an inference method with
+    `_fitted_attrs_like` instead.
+
+    Unlike `move_to`, this accepts containers (`dict`, `list`, `tuple`, ...) of
+    arrays, which are walked like `_fitted_attrs_as_numpy` walks fitted
+    attributes, and leaves values that are not arrays, such as Python scalars,
+    unchanged.
+
+    Parameters
+    ----------
+    *values : arrays, containers of arrays or other objects
+        The values to move.
+
+    xp : array namespace
+        Array API namespace to move the arrays to.
+
+    device : device
+        Array API device to move the arrays to.
+
+    dtype : dtype, default=None
+        If given, real floating point arrays are also cast to `dtype`. Pass the
+        dtype that the estimator would use for this computation in a fresh fit,
+        for example the floating dtype of `X`. Leave it as None to keep the dtype
+        of the stored state, for example for accumulators that are kept in a
+        higher precision than `X`. Arrays of other dtypes are never cast.
+
+        `dtype` is ignored when `xp` is NumPy, like `_fitted_attrs_like` does not
+        cast for NumPy `X`: NumPy promotes mixed float dtypes, so NumPy inputs
+        keep the behaviour they have without array API dispatch. Cast explicitly
+        where a NumPy computation needs a specific dtype.
+
+    Returns
+    -------
+    moved : object or tuple of objects
+        The moved values, a single one if a single value was passed.
+    """
+    if _is_numpy_namespace(xp):
+        dtype = None
+
+    def convert(array):
+        array = move_to(array, xp=xp, device=device)
+        if (
+            dtype is not None
+            and array.dtype != dtype
+            and xp.isdtype(array.dtype, "real floating")
+        ):
+            array = xp.astype(array, dtype)
+        return array
+
+    moved = tuple(
+        _convert_arrays(value, convert, recurse_estimators=False) for value in values
+    )
+    return moved[0] if len(moved) == 1 else moved
+
+
 class _FittedAttrsLike:
     """Read-only view of an estimator's fitted attributes in `xp` on `device`.
 
@@ -1195,7 +1256,9 @@ class _FittedAttrsLike:
     (``self.coef_.ndim``, ``self.classes_.shape[0]``), since metadata is the same
     either way and reading it here would trigger a pointless transfer.
 
-    When `dtype` is given, floating point attributes are also cast to it.
+    When `dtype` is given, floating point attributes are also cast to it. Reading
+    `classes_` raises a `TypeError`, because class labels must not be cast; see
+    `_take_classes`.
     """
 
     def __init__(self, estimator, xp, device, dtype=None):
@@ -1204,21 +1267,22 @@ class _FittedAttrsLike:
         self._device = device
         self._dtype = dtype
 
-    def _convert(self, array):
-        array = move_to(array, xp=self._xp, device=self._device)
-        if (
-            self._dtype is not None
-            and array.dtype != self._dtype
-            and self._xp.isdtype(array.dtype, "real floating")
-        ):
-            array = self._xp.astype(array, self._dtype)
-        return array
-
     def __getattr__(self, name):
-        # Walk containers the same way `_fitted_attrs_as_numpy` does, so that
-        # every array it stored as NumPy is moved back here.
-        value = _convert_arrays(
-            getattr(self._estimator, name), self._convert, recurse_estimators=False
+        if name == "classes_":
+            # Not an `AttributeError`: `hasattr` and `getattr(..., default)` would
+            # swallow it and report the attribute as missing.
+            raise TypeError(
+                "Read `classes_` from the estimator, not from a fitted attribute "
+                "view: the view casts floating point attributes to the dtype of "
+                "`X`, but labels are compared by value. Use `_take_classes` to turn "
+                "predicted indices into labels, and `move_to(self.classes_, ...)` "
+                "to compare `classes_` with labels."
+            )
+        value = _move_state(
+            getattr(self._estimator, name),
+            xp=self._xp,
+            device=self._device,
+            dtype=self._dtype,
         )
         # `__getattr__` is only consulted for names that are not already in the
         # instance dict, so writing to it makes the next access "cached".
