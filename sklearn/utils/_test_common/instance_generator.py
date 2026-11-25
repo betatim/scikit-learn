@@ -1029,6 +1029,18 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
             "the wrapped StandardScaler does not yet move its fitted attributes to "
             "the namespace and device of X"
         ),
+        # TODO(#34604): remove once StandardScaler stores its fitted attributes as
+        # NumPy, see https://github.com/betatim/scikit-learn/pull/4. Only the
+        # check that the fitted estimator pickles without its array library
+        # fails.
+        "check_array_api_input": (
+            "the wrapped StandardScaler does not yet store its fitted attributes "
+            "as NumPy, so the pickled FeatureUnion depends on the array library"
+        ),
+        "check_array_api_mixed_inputs": (
+            "the wrapped StandardScaler does not yet store its fitted attributes "
+            "as NumPy, so the pickled FeatureUnion depends on the array library"
+        ),
         # Fails because StandardScaler, which gets wrapped by FeatureUnion, supports
         # array API but FeatureUnion itself does not
         "check_estimators_overwrite_params": "FIXME",
