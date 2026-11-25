@@ -198,14 +198,16 @@ def _one_hot_encoding_multiclass_target(y_true, labels, target_xp, target_device
     Also return the classes provided by `LabelBinarizer` in additional to the
     integer encoded array.
     """
-    xp, _ = get_namespace(y_true)
+    xp, _, device = get_namespace_and_device(y_true)
 
     lb = LabelBinarizer()
     if labels is not None:
         lb = lb.fit(labels)
+        # `classes_` is stored as NumPy, compare it in the namespace of `labels`.
+        classes = move_to(lb.classes_, xp=xp, device=device)
         # LabelBinarizer does not respect the order implied by labels, which
         # can be misleading.
-        if not xp.all(lb.classes_ == labels):
+        if not xp.all(classes == labels):
             warnings.warn(
                 f"Labels passed were {labels}. But this function "
                 "assumes labels are ordered lexicographically. "
@@ -222,6 +224,7 @@ def _one_hot_encoding_multiclass_target(y_true, labels, target_xp, target_device
 
     else:
         lb = lb.fit(y_true)
+        classes = move_to(lb.classes_, xp=xp, device=device)
 
     if lb.classes_.shape[0] == 1:
         if labels is None:
@@ -242,7 +245,7 @@ def _one_hot_encoding_multiclass_target(y_true, labels, target_xp, target_device
         transformed_labels = target_xp.concat(
             (1 - transformed_labels, transformed_labels), axis=1
         )
-    return transformed_labels, lb.classes_
+    return transformed_labels, classes
 
 
 def _validate_multiclass_probabilistic_prediction(

@@ -2942,6 +2942,33 @@ def test_log_loss_pandas_input():
         assert_allclose(loss, 0.7469410)
 
 
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+def test_log_loss_array_api_labels(array_namespace, device_name, dtype_name):
+    """Check `log_loss` with `labels` in the namespace and device of `y_true`."""
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    y_true = np.array([0, 2, 1, 2])
+    y_proba = np.array(
+        [[0.7, 0.2, 0.1], [0.1, 0.2, 0.7], [0.2, 0.6, 0.2], [0.1, 0.1, 0.8]],
+        dtype=dtype_name,
+    )
+    labels = np.array([0, 1, 2])
+    expected = log_loss(y_true, y_proba, labels=labels)
+
+    with config_context(array_api_dispatch=True):
+        result = log_loss(
+            xp.asarray(y_true, device=device),
+            xp.asarray(y_proba, device=device),
+            labels=xp.asarray(labels, device=device),
+        )
+
+    assert result == pytest.approx(
+        expected, rel=1e-4 if dtype_name == "float32" else 1e-12
+    )
+
+
 def test_log_loss_warnings():
     expected_message = re.escape(
         "Labels passed were ['spam', 'eggs', 'ham']. But this function "
