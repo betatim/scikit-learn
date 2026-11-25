@@ -1121,6 +1121,10 @@ _NUMPY_FITTED_ATTRS = frozenset(
         "LabelEncoder",
         "LogisticRegression",
         "LogisticRegressionCV",
+        # Subclass of LogisticRegression used in the tests of `check_estimator`.
+        # Its `classes_` comes from the converted `LabelEncoder`, so the rest of
+        # its fitted attributes have to be converted as well.
+        "PoorScoreLogisticRegression",
     }
 )
 
