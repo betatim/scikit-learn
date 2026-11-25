@@ -1118,6 +1118,7 @@ def _estimator_with_converted_arrays(estimator, converter):
 _NUMPY_FITTED_ATTRS = frozenset(
     {
         "CalibratedClassifierCV",
+        "LabelBinarizer",
         "LogisticRegression",
         "LogisticRegressionCV",
         "PoissonRegressor",
