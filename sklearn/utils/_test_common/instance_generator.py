@@ -161,7 +161,6 @@ from sklearn.neural_network import BernoulliRBM, MLPClassifier, MLPRegressor
 from sklearn.pipeline import FeatureUnion, Pipeline
 from sklearn.preprocessing import (
     KBinsDiscretizer,
-    MaxAbsScaler,
     OneHotEncoder,
     QuantileTransformer,
     SplineTransformer,
@@ -1179,16 +1178,6 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
         ),
         "check_sample_weight_equivalence_on_sparse_data": (
             "sample_weight is not equivalent to removing/repeating samples."
-        ),
-    },
-    MaxAbsScaler: {
-        "check_array_api_cross_namespace_inference": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-        "check_array_api_cross_namespace_inference_mixed_dtypes": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
         ),
     },
     MiniBatchKMeans: {

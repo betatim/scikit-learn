@@ -866,7 +866,9 @@ def test_standard_scaler_array_api_compliance(
 
 
 @pytest.mark.parametrize("fit_on_numpy", [True, False])
-@pytest.mark.parametrize("estimator", [StandardScaler(), MinMaxScaler()])
+@pytest.mark.parametrize(
+    "estimator", [StandardScaler(), MinMaxScaler(), MaxAbsScaler()]
+)
 @pytest.mark.parametrize(
     "array_namespace, device_name, dtype_name",
     yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
@@ -899,7 +901,9 @@ def test_scaler_inverse_transform_other_namespace(
 
 
 @pytest.mark.parametrize("first_on_numpy", [True, False])
-@pytest.mark.parametrize("estimator", [StandardScaler(), MinMaxScaler()])
+@pytest.mark.parametrize(
+    "estimator", [StandardScaler(), MinMaxScaler(), MaxAbsScaler()]
+)
 @pytest.mark.parametrize(
     "array_namespace, device_name, dtype_name",
     yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),

@@ -1122,6 +1122,7 @@ _NUMPY_FITTED_ATTRS = frozenset(
         "KernelCenterer",
         "LogisticRegression",
         "LogisticRegressionCV",
+        "MaxAbsScaler",
         "MinMaxScaler",
         "Normalizer",
         "PolynomialFeatures",

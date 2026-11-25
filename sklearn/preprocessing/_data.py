@@ -1344,7 +1344,12 @@ class MaxAbsScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
         if first_pass:
             self.n_samples_seen_ = X.shape[0]
         else:
-            max_abs = xp.maximum(self.max_abs_, max_abs)
+            # The state of previous calls is stored as NumPy arrays. A fresh fit
+            # keeps it in the dtype of `X`.
+            prev_max_abs = _move_state(
+                self.max_abs_, xp=xp, device=array_device(X), dtype=X.dtype
+            )
+            max_abs = xp.maximum(prev_max_abs, max_abs)
             self.n_samples_seen_ += X.shape[0]
 
         self.max_abs_ = max_abs
@@ -1384,7 +1389,8 @@ class MaxAbsScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
             if self.clip:
                 np.clip(X.data, -1.0, 1.0, out=X.data)
         else:
-            X /= self.scale_
+            fitted = _fitted_attrs_like(self, X, xp=xp, device=array_device(X))
+            X /= fitted.scale_
             if self.clip:
                 device = array_device(X)
                 X = _modify_in_place_if_numpy(
@@ -1426,7 +1432,8 @@ class MaxAbsScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
         if sparse.issparse(X):
             inplace_column_scale(X, self.scale_)
         else:
-            X *= self.scale_
+            fitted = _fitted_attrs_like(self, X, xp=xp, device=array_device(X))
+            X *= fitted.scale_
         return X
 
     def __sklearn_tags__(self):
