@@ -592,6 +592,10 @@ PER_ESTIMATOR_CHECK_PARAMS: dict = {
         "check_array_api_input": dict(
             max_iter=5, n_init=2, init_params="random_from_data"
         ),
+        # The check data has rank 8 with 10 features, so with the default
+        # `reg_covar` the full covariance is nearly singular and a float32 fit
+        # step legitimately ends up far from the float64 reference.
+        "check_array_api_cross_namespace_warm_start_mixed_dtypes": dict(reg_covar=1e-2),
     },
     GaussianRandomProjection: {"check_dict_unchanged": dict(n_components=1)},
     GraphicalLasso: {"check_array_api_input": dict(max_iter=5, alpha=1.0)},
