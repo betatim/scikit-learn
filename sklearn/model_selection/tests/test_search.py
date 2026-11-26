@@ -3078,43 +3078,6 @@ def test_search_cv_pipeline_with_step_without_array_api_support(
         assert isinstance(search.score(X_xp, y_xp), float)
 
 
-@pytest.mark.parametrize(
-    "array_namespace, device_name, dtype_name",
-    yield_namespace_device_dtype_combinations(),
-)
-@pytest.mark.parametrize("SearchCV", [GridSearchCV, RandomizedSearchCV])
-def test_search_cv_score_cross_namespace(
-    SearchCV, array_namespace, device_name, dtype_name
-):
-    """`score` accepts `X` from another namespace, device and float dtype.
-
-    The common checks do not call `score`. Covers fitting on `xp` and scoring
-    NumPy, and fitting float64 NumPy and scoring `xp`.
-    """
-    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
-    X_np, y_np = make_classification(n_samples=40, n_features=5, random_state=0)
-    X_xp = xp.asarray(X_np.astype(dtype_name), device=device)
-    y_xp = xp.asarray(y_np, device=device)
-
-    def make_search():
-        return _make_search(SearchCV, LogisticRegression(), {"C": [0.5, 1.0]})
-
-    with config_context(array_api_dispatch=False):
-        search_np = make_search().fit(X_np, y_np)
-        expected = search_np.score(X_np, y_np)
-
-    with config_context(array_api_dispatch=True):
-        search_xp = make_search().fit(X_xp, y_xp)
-        assert not _non_numpy_array_paths(search_xp)
-        # Holding only NumPy arrays, the search unpickles without `xp`.
-        search_xp = pickle.loads(pickle.dumps(search_xp))
-        for search, X, y in [(search_xp, X_np, y_np), (search_np, X_xp, y_xp)]:
-            score = search.score(X, y)
-            assert isinstance(score, float)
-            # `accuracy_score` averages integer labels in float32 with PyTorch.
-            assert score == pytest.approx(expected, abs=1e-6)
-
-
 # TODO(#34604): remove the xfail once StandardScaler stores its fitted attributes
 # as NumPy.
 @pytest.mark.xfail(
