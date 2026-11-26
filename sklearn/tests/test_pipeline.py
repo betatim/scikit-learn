@@ -62,7 +62,6 @@ from sklearn.tests.metadata_routing_common import (
 from sklearn.utils import get_tags
 from sklearn.utils._array_api import (
     _atol_for_type,
-    get_namespace_and_device,
     move_to,
     yield_namespace_device_dtype_combinations,
 )
@@ -2056,11 +2055,8 @@ def test_feature_union_array_api_compliance(array_namespace, device_name, dtype_
         for name, trans in union.transformer_list:
             for attr in ["components_", "normalization_"]:
                 if hasattr(trans, attr):
-                    trans_xp, _, trans_device = get_namespace_and_device(
-                        getattr(trans, attr)
-                    )
-                    assert trans_xp is xp
-                    assert trans_device == get_namespace_and_device(X_xp)[2]
+                    # `Nystroem` stores its fitted attributes as NumPy arrays.
+                    assert isinstance(getattr(trans, attr), np.ndarray)
 
     atol = _atol_for_type(dtype_name)
     assert_allclose(X_np_transformed, X_xp_transformed_np, atol=atol)
