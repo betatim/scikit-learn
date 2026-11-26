@@ -696,6 +696,8 @@ PER_ESTIMATOR_CHECK_PARAMS: dict = {
         # `score` depends on the LAPACK implementation.
         "check_array_api_input": dict(n_components=5),
         "check_array_api_mixed_inputs": dict(n_components=5),
+        "check_array_api_cross_namespace_inference": dict(n_components=5),
+        "check_array_api_cross_namespace_inference_mixed_dtypes": dict(n_components=5),
     },
     PLSCanonical: {"check_dict_unchanged": dict(max_iter=5, n_components=1)},
     PLSRegression: {"check_dict_unchanged": dict(max_iter=5, n_components=1)},
