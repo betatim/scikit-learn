@@ -632,7 +632,7 @@ def test_covariance_cross_namespace_inference(
 ):
     """Inference methods follow the namespace of their input, not that of `fit`.
 
-    `score`, `mahalanobis` and `error_norm` are not called by the common checks.
+    `mahalanobis` and `error_norm` are not called by the common checks.
     """
     xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
 
@@ -644,7 +644,6 @@ def test_covariance_cross_namespace_inference(
 
     with config_context(array_api_dispatch=False):
         est_ref = Estimator(store_precision=store_precision).fit(X_np)
-        score_ref = est_ref.score(X_np)
         dist_ref = est_ref.mahalanobis(X_np)
         error_ref = est_ref.error_norm(comp_cov_np)
 
@@ -659,7 +658,6 @@ def test_covariance_cross_namespace_inference(
         dist = est_xp.mahalanobis(X_np)
         assert isinstance(dist, np.ndarray)
         assert_allclose(dist, dist_ref, rtol=rtol, atol=atol)
-        assert_allclose(est_xp.score(X_np), score_ref, rtol=rtol, atol=atol)
         assert_allclose(est_xp.error_norm(comp_cov_np), error_ref, rtol=rtol, atol=atol)
 
         # Fitted on NumPy, used with `xp`.
@@ -670,9 +668,6 @@ def test_covariance_cross_namespace_inference(
         assert_allclose(
             move_to(dist, xp=np, device="cpu"), dist_ref, rtol=rtol, atol=atol
         )
-        score = est_np.score(X_xp)
-        assert isinstance(score, float)
-        assert_allclose(score, score_ref, rtol=rtol, atol=atol)
         assert_allclose(est_np.error_norm(comp_cov_xp), error_ref, rtol=rtol, atol=atol)
 
 
@@ -702,7 +697,6 @@ def test_covariance_inference_float32_after_float64_fit(
 
     with config_context(array_api_dispatch=False):
         est_ref = Estimator(store_precision=store_precision).fit(X)
-        score_ref = est_ref.score(X)
         dist_ref = est_ref.mahalanobis(X)
 
     with config_context(array_api_dispatch=True):
@@ -714,7 +708,3 @@ def test_covariance_inference_float32_after_float64_fit(
         assert array_device(dist) == array_device(X_xp)
         assert dist.dtype == X_xp.dtype
         assert_allclose(move_to(dist, xp=np, device="cpu"), dist_ref, rtol=1e-4)
-
-        score = est.score(X_xp)
-        assert isinstance(score, float)
-        assert_allclose(score, score_ref, rtol=1e-4)
