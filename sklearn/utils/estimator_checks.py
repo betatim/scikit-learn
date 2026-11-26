@@ -433,6 +433,40 @@ def _yield_array_api_checks(estimator, only_numpy=False):
                 array_namespace=array_namespace,
                 device_name=device_name,
             )
+        # 6. `partial_fit` with batches from different namespaces, and a
+        # `warm_start` fit after a fit in another namespace. As for 4. and 5., one
+        # namespace is enough for the same dtype, mixed dtypes need all of them.
+        two_fit_checks = []
+        if hasattr(estimator, "partial_fit"):
+            two_fit_checks.append(
+                (
+                    check_array_api_cross_namespace_partial_fit,
+                    check_array_api_cross_namespace_partial_fit_mixed_dtypes,
+                )
+            )
+        if "warm_start" in estimator.get_params():
+            two_fit_checks.append(
+                (
+                    check_array_api_cross_namespace_warm_start,
+                    check_array_api_cross_namespace_warm_start_mixed_dtypes,
+                )
+            )
+        for check, check_mixed_dtypes in two_fit_checks:
+            yield partial(check, array_namespace="array_api_strict")
+            for (
+                array_namespace,
+                device_name,
+                dtype_name,
+            ) in yield_namespace_device_dtype_combinations(
+                include_numpy_namespaces=False
+            ):
+                if dtype_name != "float32":
+                    continue
+                yield partial(
+                    check_mixed_dtypes,
+                    array_namespace=array_namespace,
+                    device_name=device_name,
+                )
 
 
 def _yield_all_checks(estimator, legacy: bool):
@@ -1525,6 +1559,37 @@ def check_array_api_input_and_values(
     )
 
 
+# Methods called by the cross-namespace inference checks. They all take `X` (or,
+# for `inverse_transform`, the output of `transform`) and return an array that
+# follows their input, except `score`, which returns a Python float.
+_CROSS_NAMESPACE_INFERENCE_METHODS = (
+    "decision_function",
+    "inverse_transform",
+    "predict",
+    "predict_joint_log_proba",
+    "predict_log_proba",
+    "predict_proba",
+    "score",
+    "score_samples",
+    "transform",
+)
+
+
+def _call_inference_method(estimator, method_name, X, y, Xt):
+    """Call `method_name` of `estimator` with the arguments it takes.
+
+    `score` gets `X` and `y` (unsupervised estimators ignore `y`),
+    `inverse_transform` gets `Xt`, an output of `transform` in the namespace of
+    `X`, and all other methods get `X`.
+    """
+    method = getattr(estimator, method_name)
+    if method_name == "score":
+        return method(X, y)
+    if method_name == "inverse_transform":
+        return method(Xt)
+    return method(X)
+
+
 def check_array_api_cross_namespace_inference(
     name, estimator_orig, array_namespace, device_name=None
 ):
@@ -1555,45 +1620,51 @@ def check_array_api_cross_namespace_inference(
 
     with config_context(array_api_dispatch=False):
         est_np.fit(X, y)
+        # Input for `inverse_transform`, computed once so that `inverse_transform`
+        # is checked independently of `transform`.
+        Xt = est_np.transform(X) if hasattr(est_np, "inverse_transform") else None
 
-    methods = (
-        "decision_function",
-        "predict",
-        "predict_log_proba",
-        "predict_proba",
-        "transform",
-    )
+    with config_context(array_api_dispatch=True):
+        Xt_xp = None if Xt is None else xp.asarray(Xt, device=device)
+
     atol = _atol_for_type(X.dtype)
 
-    for method_name in methods:
+    for method_name in _CROSS_NAMESPACE_INFERENCE_METHODS:
         if getattr(est_np, method_name, None) is None:
             continue
 
         with config_context(array_api_dispatch=False):
-            expected = getattr(est_np, method_name)(X)
+            expected = _call_inference_method(est_np, method_name, X, y, Xt)
 
         # Fitted on `xp`, called with NumPy.
         with config_context(array_api_dispatch=True):
-            result = getattr(est_xp, method_name)(X)
-            result_ns = get_namespace(result)[0]
-        assert _is_numpy_namespace(result_ns), (
-            f"{name}.{method_name}() called with a NumPy input returned a "
-            f"{result_ns.__name__} array, the output should follow the input"
-        )
+            result = _call_inference_method(est_xp, method_name, X, y, Xt)
+            if method_name == "score":
+                assert isinstance(result, float), method_name
+            else:
+                result_ns = get_namespace(result)[0]
+                assert _is_numpy_namespace(result_ns), (
+                    f"{name}.{method_name}() called with a NumPy input returned a "
+                    f"{result_ns.__name__} array, the output should follow the input"
+                )
         # `est_xp` and `est_np` are separate fits, so they only agree up to
         # rounding differences between the namespaces.
         assert_allclose(result, expected, rtol=1e-6, atol=atol, err_msg=method_name)
 
         # Fitted on NumPy, called with `xp`.
         with config_context(array_api_dispatch=True):
-            result = getattr(est_np, method_name)(X_xp)
-            result_ns = get_namespace(result)[0]
-            assert array_device(result) == array_device(X_xp)
-            result = move_to(result, xp=np, device="cpu")
-        assert result_ns.__name__ == xp.__name__, (
-            f"{name}.{method_name}() called with a {xp.__name__} input returned "
-            f"a {result_ns.__name__} array, the output should follow the input"
-        )
+            result = _call_inference_method(est_np, method_name, X_xp, y_xp, Xt_xp)
+            if method_name == "score":
+                assert isinstance(result, float), method_name
+            else:
+                result_ns = get_namespace(result)[0]
+                assert array_device(result) == array_device(X_xp)
+                assert result_ns.__name__ == xp.__name__, (
+                    f"{name}.{method_name}() called with a {xp.__name__} input "
+                    f"returned a {result_ns.__name__} array, the output should "
+                    "follow the input"
+                )
+                result = move_to(result, xp=np, device="cpu")
         assert_allclose(result, expected, atol=atol, err_msg=method_name)
 
 
@@ -1628,13 +1699,6 @@ def check_array_api_cross_namespace_inference_mixed_dtypes(
     X = _enforce_estimator_tags_X(estimator_orig, X)
     y = _enforce_estimator_tags_y(estimator_orig, y)
 
-    methods = (
-        "decision_function",
-        "predict",
-        "predict_log_proba",
-        "predict_proba",
-        "transform",
-    )
     # One side of the comparison is computed in float32 and the other in float64,
     # so the tolerances are loose on purpose. They are not a statement about
     # the accuracy of the estimator.
@@ -1648,10 +1712,18 @@ def check_array_api_cross_namespace_inference_mixed_dtypes(
         X_predict = X.astype(predict_dtype)
         with config_context(array_api_dispatch=False):
             est.fit(X_fit, y)
+            # Input for `inverse_transform`, in the dtype used for prediction.
+            Xt = (
+                est.transform(X_predict).astype(predict_dtype)
+                if hasattr(est, "inverse_transform")
+                else None
+            )
         with config_context(array_api_dispatch=True):
             X_xp = xp.asarray(X_predict, device=device)
+            y_xp = xp.asarray(y, device=device)
+            Xt_xp = None if Xt is None else xp.asarray(Xt, device=device)
 
-        for method_name in methods:
+        for method_name in _CROSS_NAMESPACE_INFERENCE_METHODS:
             if getattr(est, method_name, None) is None:
                 continue
             err_msg = (
@@ -1660,23 +1732,261 @@ def check_array_api_cross_namespace_inference_mixed_dtypes(
             )
 
             with config_context(array_api_dispatch=False):
-                expected = getattr(est, method_name)(X_predict)
+                expected = _call_inference_method(est, method_name, X_predict, y, Xt)
 
             with config_context(array_api_dispatch=True):
-                result = getattr(est, method_name)(X_xp)
-                assert array_device(result) == array_device(X_xp), err_msg
-                if xp.isdtype(result.dtype, "real floating"):
-                    assert result.dtype == X_xp.dtype, (
-                        f"{err_msg} returned {result.dtype}, floating point "
-                        "outputs should have the dtype of the input"
-                    )
-                result = move_to(result, xp=np, device="cpu")
+                result = _call_inference_method(est, method_name, X_xp, y_xp, Xt_xp)
+                if method_name == "score":
+                    assert isinstance(result, float), err_msg
+                else:
+                    assert array_device(result) == array_device(X_xp), err_msg
+                    if xp.isdtype(result.dtype, "real floating"):
+                        assert result.dtype == X_xp.dtype, (
+                            f"{err_msg} returned {result.dtype}, floating point "
+                            "outputs should have the dtype of the input"
+                        )
+                    result = move_to(result, xp=np, device="cpu")
             if method_name == "predict_log_proba":
                 # The log of a probability close to 1 is not representable in
                 # float32, for example -8e-10 rounds to 0 and values around -14
                 # are off by ~0.07. `predict_proba` is compared instead.
                 continue
             assert_allclose(result, expected, rtol=rtol, atol=atol, err_msg=err_msg)
+
+
+def _partial_fit_step(estimator, step, X, y, convert):
+    """Make `partial_fit` call number `step` (0 or 1), on half of the data."""
+    batch = slice(None, X.shape[0] // 2) if step == 0 else slice(X.shape[0] // 2, None)
+    kwargs = {}
+    if step == 0 and is_classifier(estimator):
+        # `classes` is only needed in the first call, and follows `y`.
+        kwargs["classes"] = convert(np.unique(y))
+    estimator.partial_fit(convert(X[batch]), convert(y[batch]), **kwargs)
+
+
+def _warm_start_step(estimator, step, X, y, convert):
+    """Make fit call number `step` (0 or 1) with `warm_start=True`, on all data."""
+    estimator.set_params(warm_start=True)
+    estimator.fit(convert(X), convert(y))
+
+
+def _fit_in_two_steps(estimator_orig, fit_step, X, y, converters):
+    """Fit a clone of `estimator_orig` with two calls to `fit_step`.
+
+    Call number `step` passes its arrays through `converters[step]`.
+    """
+    estimator = clone(estimator_orig)
+    set_random_state(estimator)
+    for step, convert in enumerate(converters):
+        fit_step(estimator, step, X, y, convert)
+    return estimator
+
+
+def _check_two_fits_result(name, estimator, expected, err_msg, X_xp, rtol, atol):
+    """Compare the fitted array attributes of `estimator` with `expected`.
+
+    Estimators that store their fitted attributes as NumPy must also leave no
+    reference to the array library of `X_xp` behind.
+    """
+    if type(estimator).__name__ in _NUMPY_FITTED_ATTRS:
+        _check_pickle_without_array_libraries(estimator, X_xp)
+    for key, value in expected.items():
+        assert_allclose(
+            move_to(getattr(estimator, key), xp=np, device="cpu"),
+            value,
+            rtol=rtol,
+            atol=atol,
+            err_msg=f"{name}.{key} after {err_msg}",
+        )
+
+
+def _fitted_numpy_arrays(estimator):
+    return {
+        key: value
+        for key, value in vars(estimator).items()
+        if isinstance(value, np.ndarray)
+    }
+
+
+def _cast_floating(array, dtype):
+    """Cast `array` to `dtype` if it is floating point, leave labels unchanged."""
+    array = np.asarray(array)
+    if np.issubdtype(array.dtype, np.floating):
+        return array.astype(dtype)
+    return array
+
+
+def _check_two_fits_across_namespaces(
+    name, estimator_orig, array_namespace, device_name, fit_step, description
+):
+    """Check that state carried from one fit call to the next can change namespace.
+
+    `fit_step(estimator, step, X, y, convert)` makes fit call number `step` (0 or
+    1), passing its arrays through `convert`. The two calls are made with NumPy
+    and then `xp` inputs, and the other way around. Both orders have to give the
+    same fitted array attributes as two calls with NumPy inputs.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, "float64")
+
+    X, y = make_classification(n_samples=30, n_features=10, random_state=42)
+    X = X.astype("float64", copy=False)
+    X = _enforce_estimator_tags_X(estimator_orig, X)
+    y = _enforce_estimator_tags_y(estimator_orig, y)
+
+    def to_xp(array):
+        return xp.asarray(array, device=device)
+
+    with config_context(array_api_dispatch=False):
+        est_np = _fit_in_two_steps(
+            estimator_orig, fit_step, X, y, [np.asarray, np.asarray]
+        )
+    expected = _fitted_numpy_arrays(est_np)
+
+    for converters, order in [
+        ([np.asarray, to_xp], f"NumPy and then {xp.__name__} inputs"),
+        ([to_xp, np.asarray], f"{xp.__name__} and then NumPy inputs"),
+    ]:
+        with config_context(array_api_dispatch=True):
+            est = _fit_in_two_steps(estimator_orig, fit_step, X, y, converters)
+        _check_two_fits_result(
+            name,
+            est,
+            expected,
+            f"{description} with {order}",
+            to_xp(X),
+            rtol=1e-6,
+            atol=_atol_for_type(X.dtype),
+        )
+
+
+def _check_two_fits_across_namespaces_mixed_dtypes(
+    name, estimator_orig, array_namespace, device_name, fit_step, description
+):
+    """Same as `_check_two_fits_across_namespaces`, with mixed float dtypes.
+
+    The first call has NumPy inputs of one float dtype, the second `xp` inputs of
+    the other. Some namespaces, for example PyTorch, do not promote mixed float
+    dtypes, so the state from the first call has to be cast to the dtype of the
+    second call's input. As in `check_array_api_cross_namespace_inference_mixed_dtypes`
+    the reference, two NumPy calls with the same dtypes, promotes, so values are
+    only compared coarsely.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, "float32")
+    dtype_pairs = [("float64", "float32")]
+    try:
+        _array_api_for_tests(array_namespace, device_name, "float64")
+        dtype_pairs.append(("float32", "float64"))
+    except SkipTest:
+        # The device does not support float64, for example MPS.
+        pass
+
+    X, y = make_classification(n_samples=30, n_features=10, random_state=42)
+    X = _enforce_estimator_tags_X(estimator_orig, X)
+    y = _enforce_estimator_tags_y(estimator_orig, y)
+
+    for first_dtype, second_dtype in dtype_pairs:
+
+        def first(array, dtype=first_dtype):
+            return _cast_floating(array, dtype)
+
+        def second_np(array, dtype=second_dtype):
+            return _cast_floating(array, dtype)
+
+        def second_xp(array, dtype=second_dtype):
+            return xp.asarray(_cast_floating(array, dtype), device=device)
+
+        with config_context(array_api_dispatch=False):
+            est_np = _fit_in_two_steps(
+                estimator_orig, fit_step, X, y, [first, second_np]
+            )
+        with config_context(array_api_dispatch=True):
+            est = _fit_in_two_steps(estimator_orig, fit_step, X, y, [first, second_xp])
+        _check_two_fits_result(
+            name,
+            est,
+            _fitted_numpy_arrays(est_np),
+            f"{description} with {first_dtype} NumPy and then {second_dtype} "
+            f"{xp.__name__} inputs",
+            second_xp(X),
+            rtol=1e-3,
+            atol=_atol_for_type("float32"),
+        )
+
+
+def check_array_api_cross_namespace_partial_fit(
+    name, estimator_orig, array_namespace, device_name=None
+):
+    """Check that `partial_fit` accepts batches from different namespaces.
+
+    The state that `partial_fit` keeps between calls is stored as NumPy, and the
+    next call moves it to the namespace and device of its input. Calling
+    `partial_fit` with a NumPy batch and then a batch from `xp`, or the other way
+    around, gives the same fitted attributes as two NumPy batches.
+    """
+    _check_two_fits_across_namespaces(
+        name,
+        estimator_orig,
+        array_namespace,
+        device_name,
+        _partial_fit_step,
+        "partial_fit",
+    )
+
+
+def check_array_api_cross_namespace_partial_fit_mixed_dtypes(
+    name, estimator_orig, array_namespace, device_name=None
+):
+    """Check `partial_fit` with a batch whose float dtype differs from the first.
+
+    Same as `check_array_api_cross_namespace_partial_fit`, with a NumPy batch of
+    one float dtype followed by an `xp` batch of the other.
+    """
+    _check_two_fits_across_namespaces_mixed_dtypes(
+        name,
+        estimator_orig,
+        array_namespace,
+        device_name,
+        _partial_fit_step,
+        "partial_fit",
+    )
+
+
+def check_array_api_cross_namespace_warm_start(
+    name, estimator_orig, array_namespace, device_name=None
+):
+    """Check that a `warm_start` fit can start from a fit in another namespace.
+
+    With `warm_start=True`, `fit` starts from the fitted attributes of the
+    previous fit, which are stored as NumPy, so it moves them to the namespace
+    and device of its input. Fitting with NumPy and then `xp` inputs, or the
+    other way around, gives the same fitted attributes as two NumPy fits.
+    """
+    _check_two_fits_across_namespaces(
+        name,
+        estimator_orig,
+        array_namespace,
+        device_name,
+        _warm_start_step,
+        "warm_start",
+    )
+
+
+def check_array_api_cross_namespace_warm_start_mixed_dtypes(
+    name, estimator_orig, array_namespace, device_name=None
+):
+    """Check a `warm_start` fit whose float dtype differs from the previous fit.
+
+    Same as `check_array_api_cross_namespace_warm_start`, with a NumPy fit of one
+    float dtype followed by an `xp` fit of the other.
+    """
+    _check_two_fits_across_namespaces_mixed_dtypes(
+        name,
+        estimator_orig,
+        array_namespace,
+        device_name,
+        _warm_start_step,
+        "warm_start",
+    )
 
 
 def check_estimator_sparse_tag(name, estimator_orig):
