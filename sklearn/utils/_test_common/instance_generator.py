@@ -27,7 +27,7 @@ from sklearn.cluster import (
     SpectralCoclustering,
 )
 from sklearn.compose import ColumnTransformer
-from sklearn.covariance import GraphicalLasso, GraphicalLassoCV
+from sklearn.covariance import OAS, GraphicalLasso, GraphicalLassoCV, LedoitWolf
 from sklearn.cross_decomposition import CCA, PLSSVD, PLSCanonical, PLSRegression
 from sklearn.decomposition import (
     NMF,
@@ -1071,6 +1071,14 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
         "check_array_api_mixed_inputs": (
             "PyTorch bug when asarray used on array-api-strict boolean array"
         ),
+        "check_array_api_cross_namespace_partial_fit": (
+            "partial_fit does not yet store its state as NumPy and move it to "
+            "the namespace and device of X"
+        ),
+        "check_array_api_cross_namespace_partial_fit_mixed_dtypes": (
+            "partial_fit does not yet store its state as NumPy and move it to "
+            "the namespace and device of X"
+        ),
     },
     GradientBoostingClassifier: {
         # TODO: investigate failure see meta-issue #16298
@@ -1168,6 +1176,16 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
     KNeighborsTransformer: {
         "check_methods_sample_order_invariance": "check is not applicable."
     },
+    LedoitWolf: {
+        "check_array_api_cross_namespace_inference": (
+            "inference methods do not yet move fitted attributes to the "
+            "namespace and device of X"
+        ),
+        "check_array_api_cross_namespace_inference_mixed_dtypes": (
+            "inference methods do not yet move fitted attributes to the "
+            "namespace and device of X"
+        ),
+    },
     LinearDiscriminantAnalysis: {
         "check_array_api_cross_namespace_inference": (
             "inference methods do not yet move fitted attributes to the "
@@ -1217,6 +1235,14 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
             "inference methods do not yet move fitted attributes to the "
             "namespace and device of X"
         ),
+        "check_array_api_cross_namespace_partial_fit": (
+            "partial_fit does not yet store its state as NumPy and move it to "
+            "the namespace and device of X"
+        ),
+        "check_array_api_cross_namespace_partial_fit_mixed_dtypes": (
+            "partial_fit does not yet store its state as NumPy and move it to "
+            "the namespace and device of X"
+        ),
     },
     MiniBatchKMeans: {
         # TODO: replace by a statistical test, see meta-issue #16298
@@ -1235,6 +1261,14 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
         "check_array_api_cross_namespace_inference_mixed_dtypes": (
             "inference methods do not yet move fitted attributes to the "
             "namespace and device of X"
+        ),
+        "check_array_api_cross_namespace_partial_fit": (
+            "partial_fit does not yet store its state as NumPy and move it to "
+            "the namespace and device of X"
+        ),
+        "check_array_api_cross_namespace_partial_fit_mixed_dtypes": (
+            "partial_fit does not yet store its state as NumPy and move it to "
+            "the namespace and device of X"
         ),
     },
     NuSVC: {
@@ -1272,6 +1306,16 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
         ),
         "check_transformer_preserve_dtypes": (
             "dtypes are preserved but not at a close enough precision"
+        ),
+    },
+    OAS: {
+        "check_array_api_cross_namespace_inference": (
+            "inference methods do not yet move fitted attributes to the "
+            "namespace and device of X"
+        ),
+        "check_array_api_cross_namespace_inference_mixed_dtypes": (
+            "inference methods do not yet move fitted attributes to the "
+            "namespace and device of X"
         ),
     },
     OneClassSVM: {
@@ -1445,6 +1489,14 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
         "check_array_api_cross_namespace_inference_mixed_dtypes": (
             "inference methods do not yet move fitted attributes to the "
             "namespace and device of X"
+        ),
+        "check_array_api_cross_namespace_partial_fit": (
+            "partial_fit does not yet store its state as NumPy and move it to "
+            "the namespace and device of X"
+        ),
+        "check_array_api_cross_namespace_partial_fit_mixed_dtypes": (
+            "partial_fit does not yet store its state as NumPy and move it to "
+            "the namespace and device of X"
         ),
     },
     SVC: {
