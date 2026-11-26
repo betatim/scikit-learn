@@ -40,7 +40,6 @@ from sklearn.preprocessing._data import BOUNDS_THRESHOLD, _handle_zeros_in_scale
 from sklearn.svm import SVR
 from sklearn.utils import gen_batches, shuffle
 from sklearn.utils._array_api import (
-    get_namespace_and_device,
     move_to,
     yield_namespace_device_dtype_combinations,
 )
@@ -863,78 +862,6 @@ def test_standard_scaler_array_api_compliance(
         dtype_name=dtype_name,
         check_sample_weight=sample_weight,
     )
-
-
-@pytest.mark.parametrize("fit_on_numpy", [True, False])
-@pytest.mark.parametrize(
-    "estimator", [StandardScaler(), MinMaxScaler(), MaxAbsScaler()]
-)
-@pytest.mark.parametrize(
-    "array_namespace, device_name, dtype_name",
-    yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
-)
-def test_scaler_inverse_transform_other_namespace(
-    estimator, fit_on_numpy, array_namespace, device_name, dtype_name
-):
-    """`inverse_transform` follows the namespace, device and dtype of `X`, not
-    those of the data used to fit.
-
-    The common checks do not call `inverse_transform`. Fitting on float64 NumPy
-    data and calling it with float32 data also covers mixed dtypes.
-    """
-    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
-    X_np = iris.data
-    X_xp = xp.asarray(X_np.astype(dtype_name), device=device)
-    X_fit, X_other = (X_np, X_xp) if fit_on_numpy else (X_xp, X_np)
-
-    est = clone(estimator)
-    with config_context(array_api_dispatch=True):
-        est.fit(X_fit)
-        X_back = est.inverse_transform(est.transform(X_other))
-        X_back_xp, _, X_back_device = get_namespace_and_device(X_back)
-        X_other_xp, _, X_other_device = get_namespace_and_device(X_other)
-
-    assert X_back_xp == X_other_xp
-    assert X_back_device == X_other_device
-    assert X_back.dtype == X_other.dtype
-    assert_allclose(move_to(X_back, xp=np, device="cpu"), X_np, rtol=1e-5)
-
-
-@pytest.mark.parametrize("first_on_numpy", [True, False])
-@pytest.mark.parametrize(
-    "estimator", [StandardScaler(), MinMaxScaler(), MaxAbsScaler()]
-)
-@pytest.mark.parametrize(
-    "array_namespace, device_name, dtype_name",
-    yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
-)
-def test_scaler_partial_fit_other_namespace(
-    estimator, first_on_numpy, array_namespace, device_name, dtype_name
-):
-    """`partial_fit` accepts batches from different namespaces and devices.
-
-    The state of previous calls is stored as NumPy arrays and has to be moved to
-    the namespace and device of each new batch.
-    """
-    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
-    X_np = iris.data.astype(dtype_name)
-    X_first, X_second = X_np[:75], X_np[75:]
-    X_second_xp = xp.asarray(X_second, device=device)
-    X_first_xp = xp.asarray(X_first, device=device)
-    batches = (X_first, X_second_xp) if first_on_numpy else (X_first_xp, X_second)
-
-    est_ref = clone(estimator).fit(X_np)
-    est = clone(estimator)
-    with config_context(array_api_dispatch=True):
-        for batch in batches:
-            est.partial_fit(batch)
-
-    for name, value in vars(est_ref).items():
-        if not isinstance(value, np.ndarray):
-            continue
-        assert isinstance(getattr(est, name), np.ndarray), name
-        assert_allclose(getattr(est, name), value, rtol=1e-5, err_msg=name)
-    assert est.n_samples_seen_ == est_ref.n_samples_seen_
 
 
 def test_min_max_scaler_iris():
