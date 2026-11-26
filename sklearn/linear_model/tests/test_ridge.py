@@ -6,7 +6,7 @@ import pytest
 from scipy import linalg
 
 from sklearn import config_context, datasets
-from sklearn.base import clone, is_classifier
+from sklearn.base import clone
 from sklearn.datasets import (
     make_classification,
     make_low_rank_matrix,
@@ -2812,46 +2812,6 @@ def test_set_score_request_with_default_scoring(metaestimator, make_dataset):
 
 # End of Metadata Routing Tests
 # =============================
-
-
-@pytest.mark.parametrize(
-    "estimator",
-    [Ridge(), RidgeCV(), RidgeClassifier(), RidgeClassifierCV()],
-    ids=_get_check_estimator_ids,
-)
-@pytest.mark.parametrize(
-    "array_namespace, device_name, dtype_name",
-    yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
-)
-def test_ridge_score_cross_namespace(
-    estimator, array_namespace, device_name, dtype_name
-):
-    """Check that `score` works with a namespace and float dtype other than fit's.
-
-    `score` is not covered by the common array API checks.
-    """
-    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
-    X_np = X_iris.astype(np.float64)
-    y_np = y_iris if is_classifier(estimator) else y_iris.astype(np.float64)
-    X_xp = xp.asarray(X_np.astype(dtype_name), device=device)
-    if is_classifier(estimator):
-        y_xp = xp.asarray(y_np, device=device)
-    else:
-        y_xp = xp.asarray(y_np.astype(dtype_name), device=device)
-    rtol = 1e-4 if dtype_name == "float32" else 1e-7
-
-    estimator_np = clone(estimator).fit(X_np, y_np)
-    score_np = estimator_np.score(X_np, y_np)
-
-    with config_context(array_api_dispatch=True):
-        # Fit on NumPy float64, score on `xp`, possibly float32.
-        assert_allclose(float(estimator_np.score(X_xp, y_xp)), score_np, rtol=rtol)
-
-        # Fit on `xp`, score on NumPy float64 and float32.
-        estimator_xp = clone(estimator).fit(X_xp, y_xp)
-        for dtype in (np.float64, np.float32):
-            score = estimator_xp.score(X_np.astype(dtype), y_np)
-            assert_allclose(float(score), score_np, rtol=1e-4)
 
 
 @pytest.mark.parametrize(

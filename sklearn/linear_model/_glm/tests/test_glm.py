@@ -1434,9 +1434,10 @@ def test_poisson_regressor_array_api_warm_start(
 def test_poisson_regressor_score_cross_namespace(
     array_namespace, device_name, dtype_name
 ):
-    """Check that `score` works with a namespace and float dtype other than fit's.
+    """Check that `score` with `sample_weight` works with a namespace and float
+    dtype other than fit's.
 
-    `score` is not covered by the common array API checks.
+    The common array API checks call `score` without `sample_weight`.
     """
     xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
     rng = np.random.default_rng(0)
@@ -1463,29 +1464,3 @@ def test_poisson_regressor_score_cross_namespace(
                 X_np.astype(dtype), y_np.astype(dtype), sample_weight=sw_np
             )
             assert_allclose(score, score_np, rtol=1e-4)
-
-
-@pytest.mark.parametrize(
-    "array_namespace, device_name, dtype_name",
-    yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
-)
-def test_poisson_regressor_warm_start_cross_namespace(
-    array_namespace, device_name, dtype_name
-):
-    """Check that warm starting reuses a solution found with another namespace."""
-    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
-    rng = np.random.default_rng(0)
-    X_np = rng.standard_normal((200, 5)).astype(dtype_name)
-    y_np = (np.abs(rng.standard_normal(200)) + 0.1).astype(dtype_name)
-    X_xp = xp.asarray(X_np, device=device)
-    y_xp = xp.asarray(y_np, device=device)
-
-    reg = PoissonRegressor(solver="newton-cg", warm_start=True, tol=1e-6)
-    reg.fit(X_np, y_np)
-    coef = reg.coef_.copy()
-    with config_context(array_api_dispatch=True):
-        reg.fit(X_xp, y_xp)
-    assert isinstance(reg.coef_, np.ndarray)
-    # Starting from the solution, the solver has nothing left to do.
-    assert reg.n_iter_ <= 1
-    assert_allclose(reg.coef_, coef, rtol=1e-4, atol=_atol_for_type(dtype_name))
