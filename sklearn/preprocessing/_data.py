@@ -21,8 +21,10 @@ from sklearn.preprocessing._encoders import OneHotEncoder
 from sklearn.utils import _array_api, check_array, metadata_routing, resample
 from sklearn.utils._array_api import (
     _find_matching_floating_dtype,
+    _fitted_attrs_like,
     _max_precision_float_dtype,
     _modify_in_place_if_numpy,
+    _move_state,
     array_device,
     get_namespace,
     get_namespace_and_device,
@@ -516,8 +518,17 @@ class MinMaxScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
         if first_pass:
             self.n_samples_seen_ = X.shape[0]
         else:
-            data_min = xp.minimum(self.data_min_, data_min)
-            data_max = xp.maximum(self.data_max_, data_max)
+            # The state of previous calls is stored as NumPy arrays. A fresh fit
+            # keeps it in the dtype of `X`.
+            prev_min, prev_max = _move_state(
+                self.data_min_,
+                self.data_max_,
+                xp=xp,
+                device=device,
+                dtype=X.dtype,
+            )
+            data_min = xp.minimum(prev_min, data_min)
+            data_max = xp.maximum(prev_max, data_max)
             self.n_samples_seen_ += X.shape[0]
 
         data_range = data_max - data_min
@@ -557,8 +568,9 @@ class MinMaxScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
             reset=False,
         )
 
-        X *= self.scale_
-        X += self.min_
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=array_device(X))
+        X *= fitted.scale_
+        X += fitted.min_
         if self.clip:
             device = array_device(X)
             X = _modify_in_place_if_numpy(
@@ -596,8 +608,9 @@ class MinMaxScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
             ensure_all_finite="allow-nan",
         )
 
-        X -= self.min_
-        X /= self.scale_
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=array_device(X))
+        X -= fitted.min_
+        X /= fitted.scale_
         return X
 
     def __sklearn_tags__(self):
@@ -961,9 +974,18 @@ class StandardScaler(
         dtype = xp.int64 if sample_weight is None else X.dtype
         if first_call:
             self.n_samples_seen_ = xp.zeros(n_features, dtype=dtype, device=X_device)
-        elif size(self.n_samples_seen_) == 1:
-            self.n_samples_seen_ = xp.repeat(self.n_samples_seen_, X.shape[1])
-            self.n_samples_seen_ = xp.astype(self.n_samples_seen_, dtype, copy=False)
+        else:
+            # The state of previous calls is stored as NumPy arrays. The running
+            # statistics are kept at the highest precision of the device, so they
+            # keep their dtype.
+            self.n_samples_seen_, self.mean_, self.var_ = _move_state(
+                self.n_samples_seen_, self.mean_, self.var_, xp=xp, device=X_device
+            )
+            if size(self.n_samples_seen_) == 1:
+                self.n_samples_seen_ = xp.repeat(self.n_samples_seen_, X.shape[1])
+                self.n_samples_seen_ = xp.astype(
+                    self.n_samples_seen_, dtype, copy=False
+                )
 
         if sparse.issparse(X):
             if self.with_mean:
@@ -1099,10 +1121,11 @@ class StandardScaler(
             if self.scale_ is not None:
                 inplace_column_scale(X, 1 / self.scale_)
         else:
+            fitted = _fitted_attrs_like(self, X, xp=xp, device=X_device)
             if self.with_mean:
-                X -= xp.astype(self.mean_, X.dtype)
+                X -= xp.astype(fitted.mean_, X.dtype)
             if self.with_std:
-                X /= xp.astype(self.scale_, X.dtype)
+                X /= xp.astype(fitted.scale_, X.dtype)
         return X
 
     def inverse_transform(self, X, copy=None):
@@ -1143,10 +1166,11 @@ class StandardScaler(
             if self.scale_ is not None:
                 inplace_column_scale(X, self.scale_)
         else:
+            fitted = _fitted_attrs_like(self, X, xp=xp, device=X_device)
             if self.with_std:
-                X *= xp.astype(self.scale_, X.dtype)
+                X *= xp.astype(fitted.scale_, X.dtype)
             if self.with_mean:
-                X += xp.astype(self.mean_, X.dtype)
+                X += xp.astype(fitted.mean_, X.dtype)
         return X
 
     def __sklearn_tags__(self):
@@ -1320,7 +1344,12 @@ class MaxAbsScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
         if first_pass:
             self.n_samples_seen_ = X.shape[0]
         else:
-            max_abs = xp.maximum(self.max_abs_, max_abs)
+            # The state of previous calls is stored as NumPy arrays. A fresh fit
+            # keeps it in the dtype of `X`.
+            prev_max_abs = _move_state(
+                self.max_abs_, xp=xp, device=array_device(X), dtype=X.dtype
+            )
+            max_abs = xp.maximum(prev_max_abs, max_abs)
             self.n_samples_seen_ += X.shape[0]
 
         self.max_abs_ = max_abs
@@ -1360,7 +1389,8 @@ class MaxAbsScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
             if self.clip:
                 np.clip(X.data, -1.0, 1.0, out=X.data)
         else:
-            X /= self.scale_
+            fitted = _fitted_attrs_like(self, X, xp=xp, device=array_device(X))
+            X /= fitted.scale_
             if self.clip:
                 device = array_device(X)
                 X = _modify_in_place_if_numpy(
@@ -1402,7 +1432,8 @@ class MaxAbsScaler(OneToOneFeatureMixin, TransformerMixin, BaseEstimator):
         if sparse.issparse(X):
             inplace_column_scale(X, self.scale_)
         else:
-            X *= self.scale_
+            fitted = _fitted_attrs_like(self, X, xp=xp, device=array_device(X))
+            X *= fitted.scale_
         return X
 
     def __sklearn_tags__(self):
@@ -2460,6 +2491,10 @@ class KernelCenterer(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
     __metadata_request__transform = {"K": metadata_routing.UNUSED}
     __metadata_request__fit = {"K": metadata_routing.UNUSED}
 
+    # Required by `_fit_context`, which converts the fitted attributes to NumPy.
+    _parameter_constraints: dict = {}
+
+    @_fit_context(prefer_skip_nested_validation=True)
     def fit(self, K, y=None):
         """Fit KernelCenterer.
 
@@ -2524,9 +2559,10 @@ class KernelCenterer(ClassNamePrefixFeaturesOutMixin, TransformerMixin, BaseEsti
 
         K_pred_cols = (xp.sum(K, axis=1) / self.K_fit_rows_.shape[0])[:, None]
 
-        K -= self.K_fit_rows_
+        fitted = _fitted_attrs_like(self, K, xp=xp, device=array_device(K))
+        K -= fitted.K_fit_rows_
         K -= K_pred_cols
-        K += self.K_fit_all_
+        K += fitted.K_fit_all_
 
         return K
 
