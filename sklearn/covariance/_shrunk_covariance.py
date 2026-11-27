@@ -20,6 +20,7 @@ from sklearn.covariance import EmpiricalCovariance, empirical_covariance
 from sklearn.utils import check_array
 from sklearn.utils._array_api import (
     _add_to_diagonal,
+    _fitted_attrs_like,
     _is_numpy_namespace,
     get_namespace,
     get_namespace_and_device,
@@ -479,8 +480,9 @@ def ledoit_wolf(X, *, assume_centered=False, block_size=1000):
         block_size=block_size,
         store_precision=False,
     ).fit(X)
-
-    return estimator.covariance_, estimator.shrinkage_
+    # The estimator stores `covariance_` as NumPy, but a function returns its
+    # result in the namespace and device of its input.
+    return _fitted_attrs_like(estimator, X).covariance_, estimator.shrinkage_
 
 
 class LedoitWolf(EmpiricalCovariance):
@@ -705,7 +707,9 @@ def oas(X, *, assume_centered=False):
     estimator = OAS(
         assume_centered=assume_centered,
     ).fit(X)
-    return estimator.covariance_, estimator.shrinkage_
+    # The estimator stores `covariance_` as NumPy, but a function returns its
+    # result in the namespace and device of its input.
+    return _fitted_attrs_like(estimator, X).covariance_, estimator.shrinkage_
 
 
 class OAS(EmpiricalCovariance):
