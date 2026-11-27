@@ -290,13 +290,11 @@ def test_label_binarizer_array_api_compliance(
             move_to(binarized, xp=np, device="cpu"), np.asarray(expected)
         )
 
+        # Fitted attributes are stored as NumPy, whatever the namespace of `y`.
         fitted_classes = lb_xp.classes_
-        assert get_namespace(fitted_classes)[0].__name__ == xp.__name__
-        assert array_device(fitted_classes) == array_device(y)
+        assert isinstance(fitted_classes, np.ndarray)
         assert "int" in str(fitted_classes.dtype)
-        assert_array_equal(
-            move_to(fitted_classes, xp=np, device="cpu"), np.asarray(classes)
-        )
+        assert_array_equal(fitted_classes, np.asarray(classes))
 
         expected_xp = xp.asarray(expected, device=device)
         binarized_inverse = lb_xp.inverse_transform(expected_xp)
@@ -307,6 +305,47 @@ def test_label_binarizer_array_api_compliance(
             move_to(binarized_inverse, xp=np, device="cpu"),
             move_to(y, xp=np, device="cpu"),
         )
+
+
+@pytest.mark.parametrize(
+    "y, expected",
+    [
+        ([3, 1, 3, 1], [[1], [0], [1], [0]]),
+        ([3, 1, 2, 1], [[0, 0, 1], [1, 0, 0], [0, 1, 0], [1, 0, 0]]),
+    ],
+)
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+@pytest.mark.parametrize("fit_on_numpy", [True, False])
+def test_label_binarizer_array_api_cross_namespace(
+    y, expected, array_namespace, device_name, dtype_name, fit_on_numpy
+):
+    """Check that `LabelBinarizer` fitted in one namespace works in another one.
+
+    `classes_` is stored as NumPy, `transform` and `inverse_transform` follow
+    their input.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    y_np = np.asarray(y)
+    y_xp = xp.asarray(y, device=device)
+    y_fit, y_infer = (y_np, y_xp) if fit_on_numpy else (y_xp, y_np)
+    with config_context(array_api_dispatch=True):
+        lb = LabelBinarizer().fit(y_fit)
+        assert isinstance(lb.classes_, np.ndarray)
+        assert_array_equal(lb.classes_, np.unique(y_np))
+
+        y_infer_ns, _ = get_namespace(y_infer)
+        binarized = lb.transform(y_infer)
+        assert get_namespace(binarized)[0] is y_infer_ns
+        assert array_device(binarized) == array_device(y_infer)
+        assert_array_equal(_convert_to_numpy(binarized, xp=y_infer_ns), expected)
+
+        inverse = lb.inverse_transform(binarized)
+        assert get_namespace(inverse)[0] is y_infer_ns
+        assert array_device(inverse) == array_device(y_infer)
+        assert_array_equal(_convert_to_numpy(inverse, xp=y_infer_ns), y_np)
 
 
 @pytest.mark.parametrize(

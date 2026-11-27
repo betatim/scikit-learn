@@ -144,7 +144,10 @@ See :ref:`array_api_fitted_attributes` for details.
 .. note::
    Storing fitted attributes as NumPy arrays is being rolled out estimator by
    estimator. At the moment only :class:`~linear_model.LogisticRegression`,
-   :class:`~linear_model.LogisticRegressionCV` and
+   :class:`~linear_model.LogisticRegressionCV`,
+   :class:`~linear_model.PoissonRegressor`, :class:`~linear_model.Ridge`,
+   :class:`~linear_model.RidgeCV`, :class:`~linear_model.RidgeClassifier`,
+   :class:`~linear_model.RidgeClassifierCV` and
    :class:`~calibration.CalibratedClassifierCV` do so. All other estimators store
    their fitted attributes in the array library and on the device of the
    training data, and can require the data passed to ``predict``, ``transform``
