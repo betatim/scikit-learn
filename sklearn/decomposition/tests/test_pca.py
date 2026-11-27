@@ -14,6 +14,7 @@ from sklearn.decomposition._pca import _assess_dimension, _infer_dimension
 from sklearn.utils._array_api import (
     _atol_for_type,
     array_device,
+    get_namespace,
     move_to,
     yield_namespace_device_dtype_combinations,
 )
@@ -950,22 +951,26 @@ def check_array_api_get_precision(
     rtol = 2e-4 if iris_np.dtype == "float32" else 2e-7
     with config_context(array_api_dispatch=True):
         estimator_xp = clone(estimator).fit(iris_xp)
+        # The fitted attributes are NumPy arrays, and `get_precision` and
+        # `get_covariance` have no input to follow, so they return NumPy arrays.
         precision_xp = estimator_xp.get_precision()
+        assert isinstance(precision_xp, np.ndarray)
         assert precision_xp.shape == (4, 4)
-        assert precision_xp.dtype == iris_xp.dtype
+        assert precision_xp.dtype == iris_np.dtype
 
         assert_allclose(
-            move_to(precision_xp, xp=np, device="cpu"),
+            precision_xp,
             precision_np,
             rtol=rtol,
             atol=_atol_for_type(dtype_name),
         )
         covariance_xp = estimator_xp.get_covariance()
+        assert isinstance(covariance_xp, np.ndarray)
         assert covariance_xp.shape == (4, 4)
-        assert covariance_xp.dtype == iris_xp.dtype
+        assert covariance_xp.dtype == iris_np.dtype
 
         assert_allclose(
-            move_to(covariance_xp, xp=np, device="cpu"),
+            covariance_xp,
             covariance_np,
             rtol=rtol,
             atol=_atol_for_type(dtype_name),
@@ -1067,13 +1072,11 @@ def test_pca_mle_array_api_compliance(
     est_xp = clone(est)
     with config_context(array_api_dispatch=True):
         est_xp.fit(X_xp, y_xp)
-        components_xp = est_xp.components_
-        assert array_device(components_xp) == array_device(X_xp)
-        components_xp_np = move_to(components_xp, xp=np, device="cpu")
+        components_xp_np = est_xp.components_
+        assert isinstance(components_xp_np, np.ndarray)
 
-        explained_variance_xp = est_xp.explained_variance_
-        assert array_device(explained_variance_xp) == array_device(X_xp)
-        explained_variance_xp_np = move_to(explained_variance_xp, xp=np, device="cpu")
+        explained_variance_xp_np = est_xp.explained_variance_
+        assert isinstance(explained_variance_xp_np, np.ndarray)
 
     assert components_xp_np.dtype == components_np.dtype
     assert components_xp_np.shape[1] == components_np.shape[1]
@@ -1096,6 +1099,132 @@ def test_pca_mle_array_api_compliance(
         extra_variance_xp_np = explained_variance_xp_np[min_components:]
         assert all(np.abs(extra_variance_np - reference_variance) < atol)
         assert all(np.abs(extra_variance_xp_np - reference_variance) < atol)
+
+
+PCA_ARRAY_API_ESTIMATORS = [
+    PCA(n_components=2, svd_solver="full"),
+    PCA(n_components=2, svd_solver="full", whiten=True),
+    PCA(n_components=0.9, svd_solver="covariance_eigh", whiten=True),
+    # `noise_variance_` is 0 when all components are kept.
+    PCA(n_components=4, svd_solver="full"),
+]
+
+
+def _check_follows(result, X_xp, xp):
+    assert get_namespace(result)[0].__name__ == xp.__name__
+    assert array_device(result) == array_device(X_xp)
+    assert result.dtype == X_xp.dtype
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(include_numpy_namespaces=False),
+)
+@pytest.mark.parametrize("estimator", PCA_ARRAY_API_ESTIMATORS, ids=str)
+def test_pca_cross_namespace_inference(
+    array_namespace, device_name, dtype_name, estimator
+):
+    """Inference methods follow the namespace of their input, not that of `fit`.
+
+    `inverse_transform`, `score_samples` and `score` are not called by the
+    common checks.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+
+    X_np = iris.data.astype(dtype_name)
+    X_xp = xp.asarray(X_np, device=device)
+
+    with config_context(array_api_dispatch=False):
+        est_ref = clone(estimator).fit(X_np)
+        Xt_ref = est_ref.transform(X_np)
+        Xt_ref_xp = xp.asarray(Xt_ref, device=device)
+        inv_ref = est_ref.inverse_transform(Xt_ref)
+        score_samples_ref = est_ref.score_samples(X_np)
+        score_ref = est_ref.score(X_np)
+
+    atol = _atol_for_type(dtype_name)
+    rtol = 1e-4 if dtype_name == "float32" else 1e-7
+    with config_context(array_api_dispatch=True):
+        est_xp = clone(estimator).fit(X_xp)
+        est_np = clone(estimator).fit(X_np)
+
+        # Fitted on `xp`, used with NumPy.
+        inv = est_xp.inverse_transform(Xt_ref)
+        assert isinstance(inv, np.ndarray)
+        assert_allclose(inv, inv_ref, rtol=rtol, atol=atol)
+        score_samples = est_xp.score_samples(X_np)
+        assert isinstance(score_samples, np.ndarray)
+        assert_allclose(score_samples, score_samples_ref, rtol=rtol, atol=atol)
+        assert_allclose(est_xp.score(X_np), score_ref, rtol=rtol, atol=atol)
+
+        # Fitted on NumPy, used with `xp`.
+        inv = est_np.inverse_transform(Xt_ref_xp)
+        _check_follows(inv, Xt_ref_xp, xp)
+        assert_allclose(
+            move_to(inv, xp=np, device="cpu"), inv_ref, rtol=rtol, atol=atol
+        )
+        score_samples = est_np.score_samples(X_xp)
+        _check_follows(score_samples, X_xp, xp)
+        assert_allclose(
+            move_to(score_samples, xp=np, device="cpu"),
+            score_samples_ref,
+            rtol=rtol,
+            atol=atol,
+        )
+        score = est_np.score(X_xp)
+        assert isinstance(score, float)
+        assert_allclose(score, score_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    [
+        combination
+        for combination in yield_namespace_device_dtype_combinations(
+            include_numpy_namespaces=False
+        )
+        if combination[2] == "float32"
+    ],
+)
+@pytest.mark.parametrize("estimator", PCA_ARRAY_API_ESTIMATORS, ids=str)
+def test_pca_inference_float32_after_float64_fit(
+    array_namespace, device_name, dtype_name, estimator
+):
+    """Fitted on float64 NumPy data, inference on float32 `xp` data is float32.
+
+    Namespaces like PyTorch do not promote mixed float dtypes, and MPS has no
+    float64, so the fitted attributes have to be cast to the dtype of `X`.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+
+    X_np = iris.data
+    X_xp = xp.asarray(X_np.astype(np.float32), device=device)
+
+    with config_context(array_api_dispatch=False):
+        est_ref = clone(estimator).fit(X_np)
+        Xt_ref = est_ref.transform(X_np)
+        inv_ref = est_ref.inverse_transform(Xt_ref)
+        score_samples_ref = est_ref.score_samples(X_np)
+        score_ref = est_ref.score(X_np)
+
+    Xt_xp = xp.asarray(Xt_ref.astype(np.float32), device=device)
+    with config_context(array_api_dispatch=True):
+        est = clone(estimator).fit(X_np)
+        assert est.components_.dtype == np.float64
+
+        inv = est.inverse_transform(Xt_xp)
+        _check_follows(inv, Xt_xp, xp)
+        assert_allclose(move_to(inv, xp=np, device="cpu"), inv_ref, rtol=1e-4)
+
+        score_samples = est.score_samples(X_xp)
+        _check_follows(score_samples, X_xp, xp)
+        assert_allclose(
+            move_to(score_samples, xp=np, device="cpu"), score_samples_ref, rtol=1e-4
+        )
+
+        score = est.score(X_xp)
+        assert isinstance(score, float)
+        assert_allclose(score, score_ref, rtol=1e-4)
 
 
 @pytest.mark.skipif(

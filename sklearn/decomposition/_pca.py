@@ -12,10 +12,16 @@ from scipy.sparse import issparse
 from scipy.sparse.linalg import svds
 
 from sklearn.base import _fit_context
-from sklearn.decomposition._base import _BasePCA
+from sklearn.decomposition._base import _BasePCA, _get_precision
 from sklearn.utils import check_random_state
 from sklearn.utils._arpack import _init_arpack_v0
-from sklearn.utils._array_api import _cov, array_device, get_namespace
+from sklearn.utils._array_api import (
+    _cov,
+    _fitted_attrs_like,
+    array_device,
+    get_namespace,
+    get_namespace_and_device,
+)
 from sklearn.utils._param_validation import Interval, RealNotInt, StrOptions
 from sklearn.utils.extmath import _randomized_svd, fast_logdet, svd_flip
 from sklearn.utils.sparsefuncs import _implicit_column_offset, mean_variance_axis
@@ -773,11 +779,19 @@ class PCA(_BasePCA):
             Log-likelihood of each sample under the current model.
         """
         check_is_fitted(self)
-        xp, _ = get_namespace(X)
+        xp, is_array_api_compliant, device = get_namespace_and_device(X)
         X = validate_data(self, X, dtype=[xp.float64, xp.float32], reset=False)
-        Xr = X - self.mean_
+        fitted = _fitted_attrs_like(self, X, xp=xp, device=device)
+        Xr = X - fitted.mean_
         n_features = X.shape[1]
-        precision = self.get_precision()
+        precision = _get_precision(
+            fitted.components_,
+            fitted.explained_variance_,
+            fitted.noise_variance_,
+            self.whiten,
+            xp,
+            is_array_api_compliant,
+        )
         log_like = -0.5 * xp.sum(Xr * (Xr @ precision), axis=1)
         log_like -= 0.5 * (n_features * log(2.0 * np.pi) - fast_logdet(precision))
         return log_like
