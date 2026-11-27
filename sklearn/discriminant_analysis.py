@@ -22,8 +22,8 @@ from sklearn.linear_model._base import LinearClassifierMixin
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils._array_api import (
     _expit,
+    _fitted_attrs_like,
     array_device,
-    check_same_namespace,
     get_namespace,
     move_to,
     size,
@@ -672,7 +672,6 @@ class LinearDiscriminantAnalysis(
         self.classes_ = unique_labels(y)
         # `y` may hold strings, which no array API namespace can represent,
         # therefore convert to integer codes instead.
-        # `classes_` stays in `y`'s namespace and device.
         y_encoded = move_to(
             _encode(y, uniques=self.classes_),
             xp=xp,
@@ -766,13 +765,13 @@ class LinearDiscriminantAnalysis(
                 "transform not implemented for 'lsqr' solver (use 'svd' or 'eigen')."
             )
         check_is_fitted(self)
-        check_same_namespace(X, self, attribute="coef_", method="transform")
         X = validate_data(self, X, reset=False)
+        fitted = _fitted_attrs_like(self, X)
 
         if self.solver == "svd":
-            X_new = (X - self.xbar_) @ self.scalings_
+            X_new = (X - fitted.xbar_) @ fitted.scalings_
         elif self.solver == "eigen":
-            X_new = X @ self.scalings_
+            X_new = X @ fitted.scalings_
 
         return X_new[:, : self._max_components]
 
@@ -790,12 +789,12 @@ class LinearDiscriminantAnalysis(
             Estimated probabilities.
         """
         check_is_fitted(self)
-        check_same_namespace(X, self, attribute="coef_", method="predict_proba")
         xp, _ = get_namespace(X)
         decision = self.decision_function(X)
         if size(self.classes_) == 2:
-            proba = _expit(decision, xp=xp)
-            return xp.stack([1 - proba, proba], axis=1)
+            # `1 - expit(decision)` rounds to 0 in float32 once `decision` exceeds
+            # ~17, which `predict_log_proba` turns into a large error.
+            return xp.stack([_expit(-decision, xp=xp), _expit(decision, xp=xp)], axis=1)
         else:
             return softmax(decision)
 
@@ -812,7 +811,6 @@ class LinearDiscriminantAnalysis(
         C : ndarray of shape (n_samples, n_classes)
             Estimated log probabilities.
         """
-        check_same_namespace(X, self, attribute="coef_", method="predict_log_proba")
         xp, _ = get_namespace(X)
         prediction = self.predict_proba(X)
 

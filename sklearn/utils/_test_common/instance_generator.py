@@ -1171,16 +1171,6 @@ PER_ESTIMATOR_XFAIL_CHECKS: dict[type, dict[str, str]] = {
             "namespace and device of X"
         ),
     },
-    LinearDiscriminantAnalysis: {
-        "check_array_api_cross_namespace_inference": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-        "check_array_api_cross_namespace_inference_mixed_dtypes": (
-            "inference methods do not yet move fitted attributes to the "
-            "namespace and device of X"
-        ),
-    },
     LinearSVC: {
         # TODO: replace by a statistical test when _dual=True, see meta-issue #16298
         "check_sample_weight_equivalence_on_dense_data": (

@@ -11,7 +11,7 @@ from sklearn.covariance import (
     ShrunkCovariance,
     ledoit_wolf,
 )
-from sklearn.datasets import make_blobs
+from sklearn.datasets import make_blobs, make_classification
 from sklearn.discriminant_analysis import (
     LinearDiscriminantAnalysis,
     QuadraticDiscriminantAnalysis,
@@ -536,6 +536,22 @@ def test_lda_numeric_consistency_float32_float64():
         # Check value consistency between types
         rtol = 1e-6
         assert_allclose(clf_32.coef_, clf_64.coef_, rtol=rtol)
+
+
+def test_lda_predict_log_proba_binary_float32():
+    """Confident binary predictions keep their log probability in float32.
+
+    `1 - expit(decision)` used to round to 0 in float32, which turned a log
+    probability of about -17 into `log(smallest_normal)`, about -87.
+    """
+    X_, y_ = make_classification(n_samples=30, n_features=10, random_state=42)
+    clf_64 = LinearDiscriminantAnalysis().fit(X_, y_)
+    clf_32 = LinearDiscriminantAnalysis().fit(X_.astype(np.float32), y_)
+
+    log_proba_64 = clf_64.predict_log_proba(X_)
+    assert log_proba_64.min() < -15
+    log_proba_32 = clf_32.predict_log_proba(X_.astype(np.float32))
+    assert_allclose(log_proba_32, log_proba_64, rtol=1e-3, atol=1e-4)
 
 
 @pytest.mark.parametrize("solver", ["svd", "eigen"])
