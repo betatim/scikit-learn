@@ -13,7 +13,9 @@ from sklearn.utils import check_array
 from sklearn.utils._array_api import (
     _add_to_diagonal,
     _cholesky,
+    _fitted_attrs_like,
     _linalg_solve,
+    _move_state,
     get_namespace,
     get_namespace_and_device,
 )
@@ -39,6 +41,7 @@ def _check_weights(weights, n_components, xp=None):
     -------
     weights : array, shape (n_components,)
     """
+    xp, _ = get_namespace(weights, xp=xp)
     weights = check_array(weights, dtype=[xp.float64, xp.float32], ensure_2d=False)
     _check_shape(weights, (n_components,), "weights")
 
@@ -802,14 +805,15 @@ class GaussianMixture(BaseMixture):
         """Check the Gaussian mixture parameters are well defined."""
         _, n_features = X.shape
 
+        # The initial parameters are validated in their own namespace, which
+        # can differ from the one of X, for example when they are the NumPy
+        # fitted attributes of another model. `_initialize` moves them.
         if self.weights_init is not None:
-            self.weights_init = _check_weights(
-                self.weights_init, self.n_components, xp=xp
-            )
+            self.weights_init = _check_weights(self.weights_init, self.n_components)
 
         if self.means_init is not None:
             self.means_init = _check_means(
-                self.means_init, self.n_components, n_features, xp=xp
+                self.means_init, self.n_components, n_features
             )
 
         if self.precisions_init is not None:
@@ -818,7 +822,6 @@ class GaussianMixture(BaseMixture):
                 self.covariance_type,
                 self.n_components,
                 n_features,
-                xp=xp,
             )
 
         allowed_init_params = ["random", "random_from_data"]
@@ -866,19 +869,28 @@ class GaussianMixture(BaseMixture):
             if self.weights_init is None:
                 weights /= n_samples
 
-        self.weights_ = weights if self.weights_init is None else self.weights_init
-        self.weights_ = xp.asarray(self.weights_, device=device)
+        # The initial parameters can be in another namespace than `X`, for example
+        # the NumPy fitted attributes of another model. A fresh fit computes in the
+        # dtype of `X`.
+        weights_init, means_init, precisions_init = _move_state(
+            self.weights_init,
+            self.means_init,
+            self.precisions_init,
+            xp=xp,
+            device=device,
+            dtype=X.dtype,
+        )
+        self.weights_ = weights if weights_init is None else weights_init
+        self.means_ = means if means_init is None else means_init
 
-        self.means_ = means if self.means_init is None else self.means_init
-
-        if self.precisions_init is None:
+        if precisions_init is None:
             self.covariances_ = covariances
             self.precisions_cholesky_ = _compute_precision_cholesky(
                 covariances, self.covariance_type, xp=xp
             )
         else:
             self.precisions_cholesky_ = _compute_precision_cholesky_from_precisions(
-                self.precisions_init, self.covariance_type, xp=xp
+                precisions_init, self.covariance_type, xp=xp
             )
 
     def _m_step(self, X, log_resp, xp=None):
@@ -902,13 +914,16 @@ class GaussianMixture(BaseMixture):
         )
 
     def _estimate_log_prob(self, X, xp=None):
+        # Outside of `fit` the attributes are NumPy, inside they already follow `X`.
+        fitted = _fitted_attrs_like(self, X)
         return _estimate_log_gaussian_prob(
-            X, self.means_, self.precisions_cholesky_, self.covariance_type, xp=xp
+            X, fitted.means_, fitted.precisions_cholesky_, self.covariance_type, xp=xp
         )
 
-    def _estimate_log_weights(self, xp=None):
-        xp, _ = get_namespace(self.weights_, xp=xp)
-        return xp.log(self.weights_)
+    def _estimate_log_weights(self, X, xp=None):
+        weights = _fitted_attrs_like(self, X).weights_
+        xp, _ = get_namespace(weights, xp=xp)
+        return xp.log(weights)
 
     def _compute_lower_bound(self, _, log_prob_norm):
         return log_prob_norm

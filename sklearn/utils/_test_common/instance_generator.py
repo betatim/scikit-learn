@@ -224,7 +224,11 @@ INIT_PARAMS = {
     FeatureUnion: dict(transformer_list=[("trans1", StandardScaler())]),
     FixedThresholdClassifier: dict(estimator=LogisticRegression()),
     GammaRegressor: dict(max_iter=5),
-    GaussianMixture: dict(n_init=2, max_iter=5),
+    GaussianMixture: [
+        dict(n_init=2, max_iter=5),
+        # Only the random initialisations support the array API.
+        dict(n_init=2, max_iter=5, init_params="random"),
+    ],
     # Due to the jl lemma and often very few samples, the number
     # of components of the random matrix projection will be probably
     # greater than the number of features.
@@ -588,6 +592,10 @@ PER_ESTIMATOR_CHECK_PARAMS: dict = {
         "check_array_api_input": dict(
             max_iter=5, n_init=2, init_params="random_from_data"
         ),
+        # The check data has rank 8 with 10 features, so with the default
+        # `reg_covar` the full covariance is nearly singular and a float32 fit
+        # step legitimately ends up far from the float64 reference.
+        "check_array_api_cross_namespace_warm_start_mixed_dtypes": dict(reg_covar=1e-2),
     },
     GaussianRandomProjection: {"check_dict_unchanged": dict(n_components=1)},
     GraphicalLasso: {"check_array_api_input": dict(max_iter=5, alpha=1.0)},

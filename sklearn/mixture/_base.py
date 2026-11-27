@@ -19,10 +19,9 @@ from sklearn.utils import check_random_state
 from sklearn.utils._array_api import (
     _is_numpy_namespace,
     _logsumexp,
-    _max_precision_float_dtype,
+    _move_state,
     get_namespace,
     get_namespace_and_device,
-    move_to,
 )
 from sklearn.utils._param_validation import Interval, StrOptions
 from sklearn.utils.validation import check_is_fitted, validate_data
@@ -225,7 +224,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         labels : array, shape (n_samples,)
             Component labels.
         """
-        xp, _ = get_namespace(X)
+        xp, _, device = get_namespace_and_device(X)
         X = validate_data(self, X, dtype=[xp.float64, xp.float32], ensure_min_samples=2)
         if X.shape[0] < self.n_components:
             raise ValueError(
@@ -252,7 +251,19 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
             if do_init:
                 self._initialize_parameters(X, random_state, xp=xp)
 
-            lower_bound = -xp.inf if do_init else self.lower_bound_
+            if do_init:
+                lower_bound = -xp.inf
+            else:
+                # The previous fit stored the parameters as NumPy arrays,
+                # continue from them in the namespace, device and dtype of X.
+                params, lower_bound = _move_state(
+                    self._get_parameters(),
+                    self.lower_bound_,
+                    xp=xp,
+                    device=device,
+                    dtype=X.dtype,
+                )
+                self._set_parameters(params, xp=xp)
             current_lower_bounds = []
 
             if self.max_iter == 0:
@@ -446,7 +457,6 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
             Component labels.
         """
         check_is_fitted(self)
-        xp, _, device = get_namespace_and_device(self.means_)
 
         if n_samples < 1:
             raise ValueError(
@@ -454,34 +464,27 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
                 "least one sample." % (self.n_components)
             )
 
+        # There is no `X` whose namespace and device the samples could follow,
+        # so they are NumPy arrays, like the fitted attributes they are drawn
+        # from.
         _, n_features = self.means_.shape
         rng = check_random_state(self.random_state)
-        n_samples_comp = rng.multinomial(
-            n_samples, move_to(self.weights_, xp=np, device="cpu")
-        )
+        n_samples_comp = rng.multinomial(n_samples, self.weights_)
 
         if self.covariance_type == "full":
             X = np.vstack(
                 [
                     rng.multivariate_normal(mean, covariance, int(sample))
                     for (mean, covariance, sample) in zip(
-                        move_to(self.means_, xp=np, device="cpu"),
-                        move_to(self.covariances_, xp=np, device="cpu"),
-                        n_samples_comp,
+                        self.means_, self.covariances_, n_samples_comp
                     )
                 ]
             )
         elif self.covariance_type == "tied":
             X = np.vstack(
                 [
-                    rng.multivariate_normal(
-                        mean,
-                        move_to(self.covariances_, xp=np, device="cpu"),
-                        int(sample),
-                    )
-                    for (mean, sample) in zip(
-                        move_to(self.means_, xp=np, device="cpu"), n_samples_comp
-                    )
+                    rng.multivariate_normal(mean, self.covariances_, int(sample))
+                    for (mean, sample) in zip(self.means_, n_samples_comp)
                 ]
             )
         else:
@@ -491,22 +494,19 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
                     + rng.standard_normal(size=(sample, n_features))
                     * np.sqrt(covariance)
                     for (mean, covariance, sample) in zip(
-                        move_to(self.means_, xp=np, device="cpu"),
-                        move_to(self.covariances_, xp=np, device="cpu"),
-                        n_samples_comp,
+                        self.means_, self.covariances_, n_samples_comp
                     )
                 ]
             )
 
-        y = xp.concat(
+        y = np.concatenate(
             [
-                xp.full(int(n_samples_comp[i]), i, dtype=xp.int64, device=device)
-                for i in range(len(n_samples_comp))
+                np.full(int(sample), j, dtype=np.int64)
+                for j, sample in enumerate(n_samples_comp)
             ]
         )
 
-        max_float_dtype = _max_precision_float_dtype(xp=xp, device=device)
-        return xp.asarray(X, dtype=max_float_dtype, device=device), y
+        return np.asarray(X, dtype=np.float64), y
 
     def _estimate_weighted_log_prob(self, X, xp=None):
         """Estimate the weighted log-probabilities, log P(X | Z) + log weights.
@@ -515,15 +515,19 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         ----------
         X : array-like of shape (n_samples, n_features)
 
+
         Returns
         -------
         weighted_log_prob : array, shape (n_samples, n_component)
         """
-        return self._estimate_log_prob(X, xp=xp) + self._estimate_log_weights(xp=xp)
+        return self._estimate_log_prob(X, xp=xp) + self._estimate_log_weights(X, xp=xp)
 
     @abstractmethod
-    def _estimate_log_weights(self, xp=None):
+    def _estimate_log_weights(self, X, xp=None):
         """Estimate log-weights in EM algorithm, E[ log pi ] in VB algorithm.
+
+        Parameters
+        ----------
 
         Returns
         -------
@@ -541,6 +545,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         ----------
         X : array-like of shape (n_samples, n_features)
 
+
         Returns
         -------
         log_prob : array, shape (n_samples, n_component)
@@ -557,6 +562,7 @@ class BaseMixture(DensityMixin, BaseEstimator, metaclass=ABCMeta):
         Parameters
         ----------
         X : array-like of shape (n_samples, n_features)
+
 
         Returns
         -------

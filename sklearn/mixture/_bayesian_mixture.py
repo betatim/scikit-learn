@@ -730,7 +730,7 @@ class BayesianGaussianMixture(BaseMixture):
         self._estimate_means(nk, xk)
         self._estimate_precisions(nk, xk, sk)
 
-    def _estimate_log_weights(self, xp=None):
+    def _estimate_log_weights(self, X, xp=None):
         if self.weight_concentration_prior_type == "dirichlet_process":
             digamma_sum = digamma(
                 self.weight_concentration_[0] + self.weight_concentration_[1]
