@@ -62,6 +62,8 @@ from sklearn.tests.metadata_routing_common import (
 from sklearn.utils import get_tags
 from sklearn.utils._array_api import (
     _atol_for_type,
+    _fitted_attrs_like,
+    get_namespace,
     get_namespace_and_device,
     move_to,
     yield_namespace_device_dtype_combinations,
@@ -80,7 +82,11 @@ from sklearn.utils._testing import (
 )
 from sklearn.utils.fixes import CSR_CONTAINERS
 from sklearn.utils.metadata_routing import get_routing_for_object
-from sklearn.utils.validation import _check_feature_names, check_is_fitted
+from sklearn.utils.validation import (
+    _check_feature_names,
+    check_is_fitted,
+    validate_data,
+)
 
 # Load a shared tests data sets for the tests in this module. Mark them
 # read-only to avoid unintentional in-place modifications that would introduce
@@ -2103,6 +2109,161 @@ def test_feature_union_array_api_support_tag():
     # Only drop and passthrough -> True
     union = make_union("drop", "passthrough")
     assert get_tags(union).array_api_support is True
+
+
+class _NumpyOnlyTransformer(TransformerMixin, BaseEstimator):
+    """Transformer without array API support, like a third-party transformer."""
+
+    def fit(self, X, y=None):
+        self.mean_ = np.asarray(X).mean(axis=0)
+        return self
+
+    def transform(self, X):
+        return np.asarray(X) - self.mean_
+
+
+class _NumpyAttrsTransformer(TransformerMixin, BaseEstimator):
+    """Array API transformer that stores its fitted attributes as NumPy."""
+
+    def fit(self, X, y=None):
+        X = validate_data(self, X)
+        xp, _ = get_namespace(X)
+        self.scale_ = move_to(xp.max(xp.abs(X), axis=0), xp=np, device="cpu")
+        return self
+
+    def transform(self, X):
+        X = validate_data(self, X, reset=False)
+        return X / _fitted_attrs_like(self, X).scale_
+
+    def __sklearn_tags__(self):
+        tags = super().__sklearn_tags__()
+        tags.array_api_support = True
+        return tags
+
+
+def _xfail_if_numpy_asarray_fails(X):
+    try:
+        np.asarray(X)
+    except (TypeError, RuntimeError, ValueError):
+        pytest.xfail(
+            "A transformer without array API support calls np.asarray, which "
+            "cannot convert arrays on this device."
+        )
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+@pytest.mark.parametrize(
+    "make_transformers",
+    [
+        lambda: [("numpy_only", _NumpyOnlyTransformer())],
+        lambda: [
+            ("numpy_only", _NumpyOnlyTransformer()),
+            ("numpy_attrs", _NumpyAttrsTransformer()),
+        ],
+    ],
+    ids=["numpy_only", "numpy_only_and_numpy_attrs"],
+)
+def test_feature_union_transformer_without_array_api_support(
+    make_transformers, array_namespace, device_name, dtype_name
+):
+    """The output of FeatureUnion follows `X`, whatever its transformers return.
+
+    A transformer without array API support returns NumPy arrays. FeatureUnion
+    moves every output to the namespace and device of `X` before concatenating,
+    so it can mix such a transformer with array API transformers.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X_np = np.random.RandomState(0).uniform(size=(20, 4)).astype(dtype_name)
+    X_xp = xp.asarray(X_np, device=device)
+    atol = _atol_for_type(dtype_name)
+
+    with config_context(array_api_dispatch=False):
+        expected = FeatureUnion(make_transformers()).fit_transform(X_np)
+
+    with config_context(array_api_dispatch=True):
+        union_np = FeatureUnion(make_transformers()).fit(X_np)
+        assert_allclose(union_np.transform(X_np), expected, atol=atol)
+
+        _xfail_if_numpy_asarray_fails(X_xp)
+
+        union_xp = FeatureUnion(make_transformers())
+        results = {
+            "fit_transform": union_xp.fit_transform(X_xp),
+            "fit on xp, transform xp": union_xp.transform(X_xp),
+            "fit on numpy, transform xp": union_np.transform(X_xp),
+        }
+        for label, result in results.items():
+            xp_result, _, device_result = get_namespace_and_device(result)
+            assert xp_result is get_namespace(X_xp)[0], label
+            assert device_result == get_namespace_and_device(X_xp)[2], label
+            assert_allclose(
+                move_to(result, xp=np, device="cpu"), expected, atol=atol, err_msg=label
+            )
+
+        result = union_xp.transform(X_np)
+        assert isinstance(result, np.ndarray)
+        assert_allclose(result, expected, atol=atol)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+def test_feature_union_old_convention_transformer(
+    array_namespace, device_name, dtype_name
+):
+    """A transformer that stores fitted attributes in the namespace of `X`.
+
+    StandardScaler does not store its fitted attributes as NumPy yet. Next to a
+    transformer without array API support it works as long as `fit` and
+    `transform` use the same namespace and device.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    X_np = np.random.RandomState(0).uniform(size=(20, 4)).astype(dtype_name)
+    X_xp = xp.asarray(X_np, device=device)
+
+    def make_union():
+        return FeatureUnion(
+            [("numpy_only", _NumpyOnlyTransformer()), ("scaler", StandardScaler())]
+        )
+
+    with config_context(array_api_dispatch=False):
+        expected = make_union().fit_transform(X_np)
+
+    with config_context(array_api_dispatch=True):
+        _xfail_if_numpy_asarray_fails(X_xp)
+        union = make_union().fit(X_xp)
+        result = union.transform(X_xp)
+        assert get_namespace(result)[0] is get_namespace(X_xp)[0]
+        assert_allclose(
+            move_to(result, xp=np, device="cpu"),
+            expected,
+            atol=_atol_for_type(dtype_name),
+        )
+
+
+# TODO(#34604): remove the xfail once StandardScaler stores its fitted attributes
+# as NumPy.
+@pytest.mark.xfail(
+    reason="StandardScaler does not move its fitted attributes to the namespace "
+    "and device of X yet",
+    strict=True,
+)
+@pytest.mark.parametrize("fit_on", ["numpy", "xp"])
+def test_feature_union_old_convention_transformer_cross_namespace(fit_on):
+    xp = pytest.importorskip("array_api_strict")
+    X_np = np.random.RandomState(0).uniform(size=(20, 4))
+    X_xp = xp.asarray(X_np)
+    X_fit, X_transform = (X_np, X_xp) if fit_on == "numpy" else (X_xp, X_np)
+
+    with config_context(array_api_dispatch=True):
+        union = FeatureUnion(
+            [("numpy_only", _NumpyOnlyTransformer()), ("scaler", StandardScaler())]
+        ).fit(X_fit)
+        union.transform(X_transform)
 
 
 # transform_input tests

@@ -6,6 +6,7 @@
 from collections import Counter, defaultdict
 from copy import copy, deepcopy
 from itertools import chain, islice
+from numbers import Integral
 
 import numpy as np
 from scipy import sparse
@@ -15,7 +16,7 @@ from sklearn.callback import CallbackSupportMixin
 from sklearn.exceptions import NotFittedError
 from sklearn.preprocessing import FunctionTransformer
 from sklearn.utils import Bunch
-from sklearn.utils._array_api import get_namespace, get_namespace_and_device
+from sklearn.utils._array_api import get_namespace_and_device, move_to
 from sklearn.utils._param_validation import HasMethods, Hidden
 from sklearn.utils._repr_html.estimator import _VisualBlock
 from sklearn.utils._set_output import _get_container_adapter, _safe_set_output
@@ -1708,6 +1709,14 @@ class FeatureUnion(TransformerMixin, _BaseComposition):
     :ref:`sphx_glr_auto_examples_compose_plot_feature_union.py`.
     """
 
+    _parameter_constraints: dict = {
+        "transformer_list": [list, Hidden(tuple)],
+        "n_jobs": [Integral, None],
+        "transformer_weights": [dict, None],
+        "verbose": ["boolean"],
+        "verbose_feature_names_out": ["boolean"],
+    }
+
     def __init__(
         self,
         transformer_list,
@@ -1922,6 +1931,10 @@ class FeatureUnion(TransformerMixin, _BaseComposition):
             [name for _, name in transformer_with_feature_names_out],
         )
 
+    @_fit_context(
+        # FeatureUnion.transformer_list is not validated yet
+        prefer_skip_nested_validation=False
+    )
     def fit(self, X, y=None, **fit_params):
         """Fit all transformers using X.
 
@@ -1968,6 +1981,10 @@ class FeatureUnion(TransformerMixin, _BaseComposition):
         self._update_transformer_list(transformers)
         return self
 
+    @_fit_context(
+        # FeatureUnion.transformer_list is not validated yet
+        prefer_skip_nested_validation=False
+    )
     def fit_transform(self, X, y=None, **params):
         """Fit all transformers, transform the data and concatenate results.
 
@@ -2021,7 +2038,7 @@ class FeatureUnion(TransformerMixin, _BaseComposition):
         Xs, transformers = zip(*results)
         self._update_transformer_list(transformers)
 
-        return self._hstack(Xs)
+        return self._hstack(Xs, X)
 
     def _log_message(self, name, idx, total):
         if not self.verbose:
@@ -2089,24 +2106,27 @@ class FeatureUnion(TransformerMixin, _BaseComposition):
             xp, _, device = get_namespace_and_device(X)
             return xp.zeros((X.shape[0], 0), device=device)
 
-        return self._hstack(Xs)
+        return self._hstack(Xs, X)
 
-    def _hstack(self, Xs):
-        xp, _ = get_namespace(*Xs)
+    def _hstack(self, Xs, X):
+        # The transformers do not have to return arrays in the namespace of `X`,
+        # for example a transformer without array API support returns NumPy
+        # arrays. The output follows `X`, like that of any other transformer.
+        xp, _, device = get_namespace_and_device(X)
         # Check if Xs dimensions are valid
-        for X, (name, _) in zip(Xs, self.transformer_list):
-            if hasattr(X, "shape") and len(X.shape) != 2:
+        for X_t, (name, _) in zip(Xs, self.transformer_list):
+            if hasattr(X_t, "shape") and len(X_t.shape) != 2:
                 raise ValueError(
                     f"Transformer '{name}' returned an array or dataframe with "
-                    f"{len(X.shape)} dimensions, but expected 2 dimensions "
+                    f"{len(X_t.shape)} dimensions, but expected 2 dimensions "
                     "(n_samples, n_features)."
                 )
 
         adapter = _get_container_adapter("transform", self)
-        if adapter and all(adapter.is_supported_container(X) for X in Xs):
+        if adapter and all(adapter.is_supported_container(X_t) for X_t in Xs):
             # Store feature names out of transformers in case they don't implement
             # get_feature_names_out
-            self._transformers_feature_names_out = [X.columns for X in Xs]
+            self._transformers_feature_names_out = [X_t.columns for X_t in Xs]
 
             # Rename all columns to avoid duplicated column names.
             # The names are not important here as final column names will be
@@ -2114,8 +2134,10 @@ class FeatureUnion(TransformerMixin, _BaseComposition):
             # Use a shallow copy so that rename_columns does not mutate the original
             # DataFrames returned by the transformers without copying the data.
             Xs = [
-                adapter.rename_columns(copy(X), [f"{i}_{j}" for j in range(X.shape[1])])
-                for i, X in enumerate(Xs)
+                adapter.rename_columns(
+                    copy(X_t), [f"{i}_{j}" for j in range(X_t.shape[1])]
+                )
+                for i, X_t in enumerate(Xs)
             ]
 
             return adapter.hstack(Xs)
@@ -2123,7 +2145,7 @@ class FeatureUnion(TransformerMixin, _BaseComposition):
         if any(sparse.issparse(f) for f in Xs):
             return sparse.hstack(Xs).tocsr()
 
-        return xp.concat(Xs, axis=1)
+        return xp.concat([move_to(X_t, xp=xp, device=device) for X_t in Xs], axis=1)
 
     def _update_transformer_list(self, transformers):
         transformers = iter(transformers)
