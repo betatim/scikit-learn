@@ -1116,7 +1116,16 @@ def _estimator_with_converted_arrays(estimator, converter):
 # then converting unconditionally would break the estimators whose inference
 # still reads fitted attributes straight off `self`.
 _NUMPY_FITTED_ATTRS = frozenset(
-    {"CalibratedClassifierCV", "LogisticRegression", "LogisticRegressionCV"}
+    {
+        "CalibratedClassifierCV",
+        "LabelEncoder",
+        "LogisticRegression",
+        "LogisticRegressionCV",
+        # Subclass of LogisticRegression used in the tests of `check_estimator`.
+        # Its `classes_` comes from the converted `LabelEncoder`, so the rest of
+        # its fitted attributes have to be converted as well.
+        "PoorScoreLogisticRegression",
+    }
 )
 
 

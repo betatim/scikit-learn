@@ -1,3 +1,5 @@
+import pickle
+
 import numpy as np
 import pytest
 from scipy.sparse import issparse
@@ -16,6 +18,7 @@ from sklearn.utils._array_api import (
     _atol_for_type,
     _convert_to_numpy,
     _is_numpy_namespace,
+    _max_precision_float_dtype,
     array_device,
     get_namespace,
     indexing_dtype,
@@ -915,20 +918,118 @@ def test_label_encoder_array_api_compliance(
         np_transformed = np_label.transform(y)
         assert get_namespace(xp_transformed)[0].__name__ == xp.__name__
         assert get_namespace(xp_inv_transformed)[0].__name__ == xp.__name__
-        assert get_namespace(xp_label.classes_)[0].__name__ == xp.__name__
+        assert array_device(xp_transformed) == array_device(xp_y)
+        assert array_device(xp_inv_transformed) == array_device(xp_y)
+        assert isinstance(xp_label.classes_, np.ndarray)
         assert_array_equal(move_to(xp_transformed, xp=np, device="cpu"), np_transformed)
         assert_array_equal(move_to(xp_inv_transformed, xp=np, device="cpu"), y)
-        assert_array_equal(
-            move_to(xp_label.classes_, xp=np, device="cpu"), np_label.classes_
-        )
+        assert_array_equal(xp_label.classes_, np_label.classes_)
 
         xp_label = LabelEncoder()
         np_label = LabelEncoder()
         xp_transformed = xp_label.fit_transform(xp_y)
         np_transformed = np_label.fit_transform(y)
         assert get_namespace(xp_transformed)[0].__name__ == xp.__name__
-        assert get_namespace(xp_label.classes_)[0].__name__ == xp.__name__
+        assert array_device(xp_transformed) == array_device(xp_y)
+        assert isinstance(xp_label.classes_, np.ndarray)
         assert_array_equal(move_to(xp_transformed, xp=np, device="cpu"), np_transformed)
+        assert_array_equal(xp_label.classes_, np_label.classes_)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+@pytest.mark.parametrize("fit_on_numpy", [True, False])
+def test_label_encoder_array_api_cross_namespace(
+    array_namespace, device_name, dtype_name, fit_on_numpy
+):
+    """Check that `LabelEncoder` fitted in one namespace works in another one.
+
+    `classes_` is stored as NumPy, `transform` and `inverse_transform` follow
+    their input.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    y = np.array([3.0, 0.5, 3.0, -1.0, 0.5])
+    y_xp = xp.asarray(y.astype(dtype_name or np.float64), device=device)
+    y_fit, y_infer = (y, y_xp) if fit_on_numpy else (y_xp, y)
+    with config_context(array_api_dispatch=True):
+        le = LabelEncoder().fit(y_fit)
+        assert isinstance(le.classes_, np.ndarray)
+        assert_array_equal(le.classes_, [-1.0, 0.5, 3.0])
+
+        y_infer_ns, _ = get_namespace(y_infer)
+        transformed = le.transform(y_infer)
+        assert get_namespace(transformed)[0] is y_infer_ns
+        assert array_device(transformed) == array_device(y_infer)
         assert_array_equal(
-            move_to(xp_label.classes_, xp=np, device="cpu"), np_label.classes_
+            _convert_to_numpy(transformed, xp=y_infer_ns), [2, 1, 2, 0, 1]
+        )
+
+        inverse = le.inverse_transform(transformed)
+        assert get_namespace(inverse)[0] is y_infer_ns
+        assert array_device(inverse) == array_device(y_infer)
+        assert_array_equal(_convert_to_numpy(inverse, xp=y_infer_ns), y)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+def test_label_encoder_array_api_compares_in_classes_dtype(
+    array_namespace, device_name, dtype_name
+):
+    """Labels are compared in the dtype of `classes_`, in every namespace.
+
+    float32 labels are cast to the float64 `classes_` before comparing, so labels
+    that are not exactly representable in float32 are not found, as for NumPy
+    without array API dispatch. On devices without float64, `classes_` itself is
+    moved as float32 and the labels match.
+    """
+    xp, device = _array_api_for_tests(array_namespace, device_name, "float32")
+    y = np.array([0.1, 0.2, 0.3])
+    with config_context(array_api_dispatch=True):
+        le = LabelEncoder().fit(y)
+        y_float32 = xp.asarray(y.astype(np.float32), device=device)
+
+        if _max_precision_float_dtype(xp, device) == xp.float32:
+            assert_array_equal(
+                _convert_to_numpy(le.transform(y_float32), xp=xp), [0, 1, 2]
+            )
+        else:
+            with pytest.raises(ValueError, match="previously unseen labels"):
+                le.transform(y_float32)
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+def test_label_encoder_array_api_string_classes(
+    array_namespace, device_name, dtype_name
+):
+    """Check that `inverse_transform` returns string labels as NumPy."""
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    with config_context(array_api_dispatch=True):
+        le = LabelEncoder().fit(np.array(["b", "a", "c", "a"]))
+        indices = xp.asarray([2, 0, 1], device=device)
+        inverse = le.inverse_transform(indices)
+        assert isinstance(inverse, np.ndarray)
+        assert_array_equal(inverse, ["c", "a", "b"])
+
+
+@pytest.mark.parametrize(
+    "array_namespace, device_name, dtype_name",
+    yield_namespace_device_dtype_combinations(),
+)
+def test_label_encoder_array_api_pickle(array_namespace, device_name, dtype_name):
+    """Check that `LabelEncoder` fitted on array API inputs pickles."""
+    xp, device = _array_api_for_tests(array_namespace, device_name, dtype_name)
+    y = xp.asarray([2, 1, 3, 1], device=device)
+    with config_context(array_api_dispatch=True):
+        le = LabelEncoder().fit(y)
+        le_unpickled = pickle.loads(pickle.dumps(le))
+        assert isinstance(le_unpickled.classes_, np.ndarray)
+        assert_array_equal(
+            _convert_to_numpy(le_unpickled.transform(y), xp=xp), [1, 0, 2, 0]
         )
