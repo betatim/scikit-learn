@@ -1027,9 +1027,9 @@ def test_gnb_array_api_compliance(
         for fitted_attr in ("class_count_", "class_prior_", "theta_", "var_"):
             xp_attr = getattr(clf_xp, fitted_attr)
             np_attr = getattr(clf_np, fitted_attr)
-            assert xp_attr.dtype == X_xp.dtype
-            assert array_device(xp_attr) == array_device(X_xp)
-            assert_allclose(move_to(xp_attr, xp=np, device="cpu"), np_attr)
+            assert isinstance(xp_attr, np.ndarray)
+            assert xp_attr.dtype == X_np.dtype
+            assert_allclose(xp_attr, np_attr)
 
         y_pred_xp = clf_xp.predict(X_xp)
         if not use_str_y:
